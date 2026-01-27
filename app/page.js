@@ -19,7 +19,12 @@ export default function Home() {
     });
 
     const data = await res.json();
-    setOutput(data.output);
+    if (data.output === null) {
+  setOutput("—");
+} else {
+  setOutput(data.output);
+}
+
     setLoading(false);
   }
 
