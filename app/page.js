@@ -1,26 +1,50 @@
+"use client";
+
+import { useState } from "react";
+
 export default function Home() {
+  const [input, setInput] = useState("");
+  const [output, setOutput] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function submit() {
+    if (!input) return;
+    setLoading(true);
+    setOutput(null);
+
+    const res = await fetch("/api/wancko", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input })
+    });
+
+    const data = await res.json();
+    setOutput(data.output);
+    setLoading(false);
+  }
+
   return (
-    <main style={{ maxWidth: "720px", padding: "80px 24px", fontFamily: "system-ui" }}>
+    <main style={{ maxWidth: 720, margin: "0 auto", padding: "80px 24px" }}>
       <h1>Wancko</h1>
       <p><em>Natural assistance aligned with AU.</em></p>
 
-      <p>
-        Wancko is a natural assistant designed to support clarity, balance,
-        and decision-making within complex contexts. It does not replace
-        judgment, impose morality, or simulate authority.
-      </p>
+      <textarea
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        placeholder="Expose what matters."
+        rows={5}
+        style={{ width: "100%", marginTop: 24 }}
+      />
 
-      <p>
-        Operating within the AU framework, Wancko prioritizes coherence over
-        optimization and understanding over control. It intervenes only where
-        assistance is meaningful and refrains where autonomy must remain intact.
-      </p>
+      <button onClick={submit} disabled={loading} style={{ marginTop: 16 }}>
+        {loading ? "…" : "Expose"}
+      </button>
 
-      <p style={{ opacity: 0.7, marginTop: "32px" }}>
-        Wancko does not provide therapy, moral judgment, or external authority.
-        It operates in coordination with governance, value exchange, and
-        certification systems within the AU ecosystem.
-      </p>
+      {output && (
+        <div style={{ marginTop: 32, opacity: 0.9 }}>
+          {output}
+        </div>
+      )}
     </main>
   );
 }
