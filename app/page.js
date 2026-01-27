@@ -8,9 +8,17 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
 
   async function submit() {
-    if (!input) return;
-    setLoading(true);
-    setOutput(null);
+  setLoading(true);
+  setOutput(null);
+  setError(null);
+
+  // 🔴 PRUEBA DURA: sin backend
+  setTimeout(() => {
+    setOutput("Wancko frontend test. UI is working.");
+    setLoading(false);
+  }, 500);
+}
+
 
     const res = await fetch("/api/wancko", {
       method: "POST",
