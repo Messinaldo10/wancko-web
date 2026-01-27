@@ -8,14 +8,12 @@ function parseAU(input) {
   const text = input.toLowerCase();
 
   // MODE
-  const mode = text.includes("we") || text.includes("they")
-    ? "GM"
-    : "GC";
+  const mode =
+    text.includes("we") || text.includes("they") ? "GM" : "GC";
 
   // SCREEN
-  const screen = text.includes("tired") || text.includes("empty")
-    ? "DCN"
-    : "RAV";
+  const screen =
+    text.includes("tired") || text.includes("empty") ? "DCN" : "RAV";
 
   // MATRIX
   let matrix = "3412";
@@ -30,8 +28,11 @@ function parseAU(input) {
 
   // INTERVENTION
   let intervention = "Answer";
-  if (N_level === "N0" || N_level === "N1") intervention = "Silence";
-  else if (text.includes("?")) intervention = "StrategicQuestion";
+  if (N_level === "N0" || N_level === "N1") {
+    intervention = "Silence";
+  } else if (text.includes("?")) {
+    intervention = "StrategicQuestion";
+  }
 
   return {
     mode,
@@ -46,24 +47,38 @@ function parseAU(input) {
  * POST /api/wancko
  */
 export async function POST(req) {
-  const { input } = await req.json();
+  try {
+    const { input } = await req.json();
 
-  if (!input || input.length < 3) {
-    return NextResponse.json({ output: null });
-  }
+    if (!input || input.length < 3) {
+      return NextResponse.json({ output: null });
+    }
 
-  const au = parseAU(input);
+    const au = parseAU(input);
 
-  // SILENCE = no OpenAI call
-if (intervention === "Silence") {
-  return NextResponse.json({
-    output: "I am listening. Continue."
-  });
-}
+    /**
+     * BOOTSTRAP MODE
+     * Silencio AU → presencia mínima
+     */
+    if (au.intervention === "Silence") {
+      return NextResponse.json({
+        output: "I am listening. Continue."
+      });
+    }
 
+    /**
+     * DEBUG MODE (sin OpenAI)
+     */
+    if (process.env.DEBUG_WANCKO === "true") {
+      return NextResponse.json({
+        output: "Wancko test response. OpenAI call bypassed."
+      });
+    }
 
-  // --- OPENAI CALL (CONTROLLED) ---
-  const prompt = `
+    /**
+     * PROMPT CONTROLADO AU
+     */
+    const prompt = `
 MODE: ${au.mode}
 SCREEN: ${au.screen}
 MATRIX: ${au.matrix}
@@ -81,30 +96,42 @@ ${input}
 TASK:
 Produce a single, closed intervention.
 `;
-if (process.env.DEBUG_WANCKO === "true") {
-  return NextResponse.json({
-    output: "Wancko test response. OpenAI call bypassed."
-  });
-}
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "You are Wancko’s language engine." },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.3
-    })
-  });
+    const res = await fetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content: "You are Wancko’s language engine."
+            },
+            {
+              role: "user",
+              content: prompt
+            }
+          ],
+          temperature: 0.3
+        })
+      }
+    );
 
-  const data = await res.json();
-  const output = data.choices?.[0]?.message?.content || null;
+    const data = await res.json();
+    const output =
+      data?.choices?.[0]?.message?.content ||
+      "I am here.";
 
-  return NextResponse.json({ output });
+    return NextResponse.json({ output });
+  } catch (error) {
+    // FALLBACK ABSOLUTO (nunca dejar al usuario colgado)
+    return NextResponse.json({
+      output: "I am here."
+    });
+  }
 }
