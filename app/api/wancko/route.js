@@ -78,6 +78,11 @@ ${input}
 TASK:
 Produce a single, closed intervention.
 `;
+if (process.env.DEBUG_WANCKO === "true") {
+  return NextResponse.json({
+    output: "Wancko test response. OpenAI call bypassed."
+  });
+}
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
