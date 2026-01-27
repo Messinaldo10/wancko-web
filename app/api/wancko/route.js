@@ -55,9 +55,12 @@ export async function POST(req) {
   const au = parseAU(input);
 
   // SILENCE = no OpenAI call
-  if (au.intervention === "Silence") {
-    return NextResponse.json({ output: null });
-  }
+if (au.intervention === "Silence") {
+  return NextResponse.json({
+    output: "I am listening. Continue."
+  });
+}
+
 
   // --- OPENAI CALL (CONTROLLED) ---
   const prompt = `
