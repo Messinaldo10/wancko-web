@@ -36,7 +36,7 @@ else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|atura
 }
 
 /** ---------- Strategic Question (LOCAL, sin OpenAI) ---------- */
-function strategicQuestion(au) {
+function strategicQuestion(au, lang = "en") {
   // 1 sola pregunta. Cerrada. Sin “follow-up”.
   const { mode, screen, matrix } = au;
 
