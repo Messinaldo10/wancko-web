@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-/** ---------- AU PARSER v0 (tu base) ---------- */
+/** ---------- AU PARSER v0.1 ---------- */
 function parseAU(input) {
   const text = input.toLowerCase();
 
@@ -9,20 +9,18 @@ function parseAU(input) {
 
   let matrix = "3412";
 
-// EN / ES / CA — estructura (norma)
-if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) {
-  matrix = "1234";
-}
-
-// EN / ES / CA — inversión / duda
-else if (/(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text)) {
-  matrix = "2143";
-}
-
-// EN / ES / CA — disolución / ruptura
-else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
-  matrix = "4321";
-}
+  // EN / ES / CA — estructura (norma)
+  if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) {
+    matrix = "1234";
+  }
+  // EN / ES / CA — inversión / duda
+  else if (/(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text)) {
+    matrix = "2143";
+  }
+  // EN / ES / CA — disolución / ruptura
+  else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
+    matrix = "4321";
+  }
 
   let N_level = "N3";
   if (text.includes("harm") || text.includes("force")) N_level = "N0";
@@ -35,44 +33,79 @@ else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|atura
   return { mode, screen, matrix, intervention, N_level };
 }
 
-/** ---------- Strategic Question (LOCAL, sin OpenAI) ---------- */
+/** ---------- Strategic Question (MULTILENGUA, LOCAL) ---------- */
+const SQ = {
+  en: {
+    release: "What are you trying to release, exactly?",
+    invert: "What flips if you assume the opposite is true for one minute?",
+    stop: "What is the smallest thing you can stop feeding today?",
+    rule: "What would be the simplest rule that everyone could actually follow?",
+    groupAssumption: "Which assumption in the group is carrying the most tension?",
+    collective: "What changes first if the collective goal becomes clearer than the individual one?",
+    step: "What is the next concrete step that costs the least and proves direction?",
+    belief: "What is the one belief you’re protecting that might be the cause?",
+    trust: "What would you stop doing if you trusted your direction?",
+    decision: "What’s the real decision you are avoiding naming?"
+  },
+  es: {
+    release: "¿Qué estás intentando soltar exactamente?",
+    invert: "¿Qué cambia si asumes que lo contrario es cierto durante un minuto?",
+    stop: "¿Qué es lo más pequeño que podrías dejar de alimentar hoy?",
+    rule: "¿Cuál sería la regla más simple que todos podrían seguir de verdad?",
+    groupAssumption: "¿Qué suposición del grupo está cargando más tensión?",
+    collective: "¿Qué cambia primero si el objetivo colectivo se vuelve más claro que el individual?",
+    step: "¿Cuál es el siguiente paso concreto que cuesta menos y demuestra dirección?",
+    belief: "¿Qué creencia estás protegiendo que podría ser la causa?",
+    trust: "¿Qué dejarías de hacer si confiaras en tu dirección?",
+    decision: "¿Qué decisión real estás evitando nombrar?"
+  },
+  ca: {
+    release: "Què estàs intentant deixar anar exactament?",
+    invert: "Què canvia si assumes que el contrari és cert durant un minut?",
+    stop: "Quina és la cosa més petita que podries deixar d’alimentar avui?",
+    rule: "Quina seria la norma més simple que tothom podria seguir de veritat?",
+    groupAssumption: "Quina suposició del grup carrega més tensió?",
+    collective: "Què canvia primer si l’objectiu col·lectiu esdevé més clar que l’individual?",
+    step: "Quin és el següent pas concret que costa menys i demostra direcció?",
+    belief: "Quina creença estàs protegint que podria ser la causa?",
+    trust: "Què deixaries de fer si confiessis en la teva direcció?",
+    decision: "Quina decisió real estàs evitant anomenar?"
+  }
+};
+
 function strategicQuestion(au, lang = "en") {
-  // 1 sola pregunta. Cerrada. Sin “follow-up”.
+  const L = SQ[lang] ? lang : "en";
   const { mode, screen, matrix } = au;
 
-  // DCN (ruptura) prioriza desprendimiento
   if (screen === "DCN") {
-    if (matrix === "4321") return "What are you trying to release, exactly?";
-    if (matrix === "2143") return "What flips if you assume the opposite is true for one minute?";
-    return "What is the smallest thing you can stop feeding today?";
+    if (matrix === "4321") return SQ[L].release;
+    if (matrix === "2143") return SQ[L].invert;
+    return SQ[L].stop;
   }
 
-  // RAV (continuidad) prioriza ajuste y ejecución
   if (mode === "GM") {
-    if (matrix === "1234") return "What would be the simplest rule that everyone could actually follow?";
-    if (matrix === "2143") return "Which assumption in the group is carrying the most tension?";
-    return "What changes first if the collective goal becomes clearer than the individual one?";
+    if (matrix === "1234") return SQ[L].rule;
+    if (matrix === "2143") return SQ[L].groupAssumption;
+    return SQ[L].collective;
   }
 
-  // GC + RAV
-  if (matrix === "1234") return "What is the next concrete step that costs the least and proves direction?";
-  if (matrix === "2143") return "What is the one belief you’re protecting that might be the cause?";
-  if (matrix === "4321") return "What would you stop doing if you trusted your direction?";
-  return "What’s the real decision you are avoiding naming?";
+  if (matrix === "1234") return SQ[L].step;
+  if (matrix === "2143") return SQ[L].belief;
+  if (matrix === "4321") return SQ[L].trust;
+  return SQ[L].decision;
 }
 
-/** ---------- AU Visual Signals (simple) ---------- */
+/** ---------- AU Visual Signals ---------- */
 function auSignals(au) {
-  // RAV: green/amber/red base; DCN: night/dusk/day metaphor but we keep it simple
   let tone = "amber";
   if (au.N_level === "N3") tone = "green";
-  if (au.N_level === "N2") tone = "amber";
-  if (au.N_level === "N1") tone = "red";
-  if (au.N_level === "N0") tone = "red";
+  if (au.N_level === "N1" || au.N_level === "N0") tone = "red";
 
-  // W proxy: ratio reason/truth keywords (v0). Keep 0..1
-  // (sin texto guardado: solo se calcula al vuelo)
-  const W = au.matrix === "1234" ? 0.35 : au.matrix === "2143" ? 0.55 : au.matrix === "3412" ? 0.5 : 0.65;
+  const W =
+    au.matrix === "1234" ? 0.35 :
+    au.matrix === "2143" ? 0.55 :
+    au.matrix === "4321" ? 0.65 :
+    0.5;
 
   return { tone, W };
 }
@@ -80,15 +113,14 @@ function auSignals(au) {
 /** ---------- Session (ARPI meta only) ---------- */
 function nextSession(prev, au) {
   const base = prev && typeof prev === "object" ? prev : {};
-
   const chain = Array.isArray(base.chain) ? base.chain : [];
+
   const next = {
     v: 1,
     turns: (base.turns || 0) + 1,
     silenceCount: base.silenceCount || 0,
     answerCount: base.answerCount || 0,
     last: au,
-    // chain item: no text, only meta
     chain: [
       ...chain.slice(-49),
       {
@@ -108,6 +140,7 @@ function nextSession(prev, au) {
   return next;
 }
 
+/** ---------- API ---------- */
 export async function POST(req) {
   try {
     const { input, session } = await req.json();
@@ -115,11 +148,12 @@ export async function POST(req) {
       return NextResponse.json({ output: null, au: null, session: session || null });
     }
 
+    const lang = req.headers.get("accept-language")?.slice(0, 2) || "en";
+
     const au = parseAU(input);
     const signals = auSignals(au);
     const newSession = nextSession(session, au);
 
-    // SILENCE bootstrap (presencia mínima)
     if (au.intervention === "Silence") {
       return NextResponse.json({
         output: "I am listening. Continue.",
@@ -128,16 +162,14 @@ export async function POST(req) {
       });
     }
 
-    // StrategicQuestion local (sin OpenAI)
     if (au.intervention === "StrategicQuestion") {
       return NextResponse.json({
-        output: strategicQuestion(au),
+        output: strategicQuestion(au, lang),
         au: { ...au, signals },
         session: newSession
       });
     }
 
-    // ANSWER via OpenAI (subordinado)
     const prompt = `
 MODE: ${au.mode}
 SCREEN: ${au.screen}
@@ -160,7 +192,7 @@ Produce a single, closed intervention.
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        Authorization: \`Bearer \${process.env.OPENAI_API_KEY}\`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -174,8 +206,6 @@ Produce a single, closed intervention.
     });
 
     if (!res.ok) {
-      const t = await res.text();
-      console.error("OpenAI HTTP error:", res.status, t);
       return NextResponse.json({
         output: "I am here. Say a little more.",
         au: { ...au, signals },
@@ -191,8 +221,7 @@ Produce a single, closed intervention.
       au: { ...au, signals },
       session: newSession
     });
-  } catch (err) {
-    console.error("Wancko fatal error:", err);
+  } catch {
     return NextResponse.json({
       output: "I am here.",
       au: null,
