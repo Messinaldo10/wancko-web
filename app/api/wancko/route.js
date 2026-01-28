@@ -9,16 +9,11 @@ function parseAU(input) {
 
   let matrix = "3412";
 
-  // EN / ES / CA — estructura (norma)
   if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) {
     matrix = "1234";
-  }
-  // EN / ES / CA — inversión / duda
-  else if (/(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text)) {
+  } else if (/(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text)) {
     matrix = "2143";
-  }
-  // EN / ES / CA — disolución / ruptura
-  else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
+  } else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
     matrix = "4321";
   }
 
@@ -140,6 +135,22 @@ function nextSession(prev, au) {
   return next;
 }
 
+/** ---------- DOUBLE ACT AU (NIVEL 2) ---------- */
+function allowSecondAct(prevSession, au) {
+  if (!prevSession || !prevSession.last) return false;
+
+  const last = prevSession.last;
+
+  if (last.matrix !== au.matrix) return true;
+  if (last.N_level !== au.N_level) return true;
+
+  if (au.intervention === "StrategicQuestion" && last.intent === "Answer") {
+    return true;
+  }
+
+  return false;
+}
+
 /** ---------- API ---------- */
 export async function POST(req) {
   try {
@@ -163,8 +174,12 @@ export async function POST(req) {
     }
 
     if (au.intervention === "StrategicQuestion") {
+      const first = strategicQuestion(au, lang);
+      const secondAllowed = allowSecondAct(session, au);
+      const output = secondAllowed ? `${first}\n\n—` : first;
+
       return NextResponse.json({
-        output: strategicQuestion(au, lang),
+        output,
         au: { ...au, signals },
         session: newSession
       });
