@@ -11,7 +11,8 @@ export default function Home() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  // load session once
+  /* ---------------- SESSION ---------------- */
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LS_KEY);
@@ -19,21 +20,31 @@ export default function Home() {
     } catch {}
   }, []);
 
-  // persist session
   useEffect(() => {
     try {
       if (session) localStorage.setItem(LS_KEY, JSON.stringify(session));
     } catch {}
   }, [session]);
 
+  /* ---------------- AU VISUAL ---------------- */
+
   const bg = useMemo(() => {
     const tone = au?.signals?.tone || "amber";
-    if (tone === "green") return "linear-gradient(135deg, #07160f, #0b2b1a)";
-    if (tone === "red") return "linear-gradient(135deg, #1a0707, #2b0b0b)";
-    return "linear-gradient(135deg, #14110b, #2b2414)";
+    const W = au?.signals?.W ?? 0.5;
+
+    // Gradiente AU = tono + desplazamiento por W
+    if (tone === "green") {
+      return `radial-gradient(circle at ${W * 100}% 40%, #0e3a22, #07160f 60%)`;
+    }
+    if (tone === "red") {
+      return `radial-gradient(circle at ${W * 100}% 40%, #3a0e0e, #1a0707 60%)`;
+    }
+    return `radial-gradient(circle at ${W * 100}% 40%, #3a3216, #14110b 60%)`;
   }, [au]);
 
   const w = au?.signals?.W ?? 0.5; // 0..1
+
+  /* ---------------- SUBMIT ---------------- */
 
   async function submit() {
     if (!input.trim() || loading) return;
@@ -56,12 +67,14 @@ export default function Home() {
       setOutput(data.output === null ? "—" : data.output);
       setAu(data.au || null);
       setSession(data.session || null);
-    } catch (e) {
+    } catch {
       setOutput("Wancko could not respond.");
     } finally {
       setLoading(false);
     }
   }
+
+  /* ---------------- UI ---------------- */
 
   return (
     <main
@@ -70,48 +83,56 @@ export default function Home() {
         background: bg,
         color: "#eaeaea",
         fontFamily: "system-ui",
-        padding: "72px 24px"
+        padding: "72px 24px",
+        transition: "background 600ms ease"
       }}
     >
       <div style={{ maxWidth: 760, margin: "0 auto" }}>
         <h1 style={{ margin: 0 }}>Wancko</h1>
-        <p style={{ opacity: 0.7, marginTop: 8 }}>
+        <p style={{ opacity: 0.65, marginTop: 8 }}>
           Natural assistant aligned with AU.
         </p>
 
-        {/* AU strip (discrete) */}
-        <div style={{ marginTop: 20, opacity: 0.85, fontSize: 13 }}>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <div>
-              <span style={{ opacity: 0.6 }}>Mode:</span>{" "}
-              {au?.mode || "—"}{" "}
-              <span style={{ opacity: 0.6, marginLeft: 8 }}>Screen:</span>{" "}
-              {au?.screen || "—"}{" "}
-              <span style={{ opacity: 0.6, marginLeft: 8 }}>Matrix:</span>{" "}
-              {au?.matrix || "—"}{" "}
-              <span style={{ opacity: 0.6, marginLeft: 8 }}>N:</span>{" "}
-              {au?.N_level || "—"}
-            </div>
+        {/* AU STRIP */}
+        <div style={{ marginTop: 22, opacity: 0.85, fontSize: 13 }}>
+          <div>
+            <span style={{ opacity: 0.6 }}>Mode:</span> {au?.mode || "—"} ·{" "}
+            <span style={{ opacity: 0.6 }}>Screen:</span> {au?.screen || "—"} ·{" "}
+            <span style={{ opacity: 0.6 }}>Matrix:</span> {au?.matrix || "—"} ·{" "}
+            <span style={{ opacity: 0.6 }}>N:</span> {au?.N_level || "—"}
           </div>
 
-          {/* W bar */}
-          <div style={{ marginTop: 10 }}>
+          {/* W BAR CONTINUA */}
+          <div style={{ marginTop: 12 }}>
             <div style={{ opacity: 0.6, marginBottom: 6 }}>
-              W (Reason ↔ Truth)
+              W · Reason ↔ Truth
             </div>
-            <div style={{ height: 10, background: "rgba(255,255,255,0.12)", borderRadius: 999 }}>
+            <div
+              style={{
+                height: 10,
+                background: "rgba(255,255,255,0.15)",
+                borderRadius: 999,
+                position: "relative"
+              }}
+            >
               <div
                 style={{
-                  width: `${Math.round(w * 100)}%`,
-                  height: "100%",
-                  background: "rgba(255,255,255,0.55)",
-                  borderRadius: 999
+                  position: "absolute",
+                  left: `${w * 100}%`,
+                  top: -4,
+                  width: 18,
+                  height: 18,
+                  borderRadius: "50%",
+                  background: "#fff",
+                  transform: "translateX(-50%)",
+                  transition: "left 500ms ease"
                 }}
               />
             </div>
           </div>
         </div>
 
+        {/* INPUT */}
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -147,20 +168,24 @@ export default function Home() {
           {loading ? "…" : "Expose"}
         </button>
 
+        {/* OUTPUT */}
         <div
           style={{
-            marginTop: 30,
-            minHeight: 48,
+            marginTop: 32,
+            minHeight: 56,
             fontSize: 18,
             whiteSpace: "pre-wrap",
-            opacity: output === "—" ? 0.45 : 1
+            opacity: output === "—" ? 0.45 : 1,
+            transition: "opacity 300ms ease"
           }}
         >
           {output}
         </div>
 
-        <div style={{ marginTop: 18, opacity: 0.5, fontSize: 12 }}>
-          Turns: {session?.turns ?? 0} · Answers: {session?.answerCount ?? 0} · Silences: {session?.silenceCount ?? 0}
+        {/* META */}
+        <div style={{ marginTop: 20, opacity: 0.45, fontSize: 12 }}>
+          Turns: {session?.turns ?? 0} · Answers: {session?.answerCount ?? 0} ·
+          Silences: {session?.silenceCount ?? 0}
         </div>
       </div>
     </main>
