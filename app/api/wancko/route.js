@@ -8,9 +8,21 @@ function parseAU(input) {
   const screen = text.includes("tired") || text.includes("empty") ? "DCN" : "RAV";
 
   let matrix = "3412";
-  if (text.includes("should") || text.includes("must")) matrix = "1234";
-  if (text.includes("why") || text.includes("doubt")) matrix = "2143";
-  if (text.includes("let go") || text.includes("stop")) matrix = "4321";
+
+// EN / ES / CA — estructura (norma)
+if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) {
+  matrix = "1234";
+}
+
+// EN / ES / CA — inversión / duda
+else if (/(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text)) {
+  matrix = "2143";
+}
+
+// EN / ES / CA — disolución / ruptura
+else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
+  matrix = "4321";
+}
 
   let N_level = "N3";
   if (text.includes("harm") || text.includes("force")) N_level = "N0";
