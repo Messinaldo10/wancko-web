@@ -9,6 +9,7 @@ export default function Home() {
   const [output, setOutput] = useState(null);
   const [au, setAu] = useState(null);
   const [session, setSession] = useState(null);
+  const [juramento, setJuramento] = useState(null);
   const [loading, setLoading] = useState(false);
 
   /* ---------------- SESSION ---------------- */
@@ -16,7 +17,11 @@ export default function Home() {
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LS_KEY);
-      if (raw) setSession(JSON.parse(raw));
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setSession(parsed);
+        if (parsed.juramento) setJuramento(parsed.juramento);
+      }
     } catch {}
   }, []);
 
@@ -32,7 +37,6 @@ export default function Home() {
     const tone = au?.signals?.tone || "amber";
     const W = au?.signals?.W ?? 0.5;
 
-    // Gradiente AU = tono + desplazamiento por W
     if (tone === "green") {
       return `radial-gradient(circle at ${W * 100}% 40%, #0e3a22, #07160f 60%)`;
     }
@@ -42,7 +46,7 @@ export default function Home() {
     return `radial-gradient(circle at ${W * 100}% 40%, #3a3216, #14110b 60%)`;
   }, [au]);
 
-  const w = au?.signals?.W ?? 0.5; // 0..1
+  const w = au?.signals?.W ?? 0.5;
 
   /* ---------------- SUBMIT ---------------- */
 
@@ -58,7 +62,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           input,
-          lang: navigator.language,
+          juramento,
           session: session || null
         })
       });
@@ -93,6 +97,27 @@ export default function Home() {
           Natural assistant aligned with AU.
         </p>
 
+        {/* JURAMENTO */}
+        <select
+          value={juramento || ""}
+          onChange={(e) => setJuramento(e.target.value || null)}
+          style={{
+            marginTop: 22,
+            padding: 10,
+            background: "rgba(0,0,0,0.35)",
+            color: "#eaeaea",
+            borderRadius: 10,
+            border: "1px solid rgba(255,255,255,0.15)"
+          }}
+        >
+          <option value="">No juramento</option>
+          <option value="disciplina">Disciplina</option>
+          <option value="ansiedad">Ansiedad</option>
+          <option value="límites">Límites</option>
+          <option value="excesos">Excesos</option>
+          <option value="soltar">Soltar</option>
+        </select>
+
         {/* AU STRIP */}
         <div style={{ marginTop: 22, opacity: 0.85, fontSize: 13 }}>
           <div>
@@ -102,7 +127,7 @@ export default function Home() {
             <span style={{ opacity: 0.6 }}>N:</span> {au?.N_level || "—"}
           </div>
 
-          {/* W BAR CONTINUA */}
+          {/* W BAR */}
           <div style={{ marginTop: 12 }}>
             <div style={{ opacity: 0.6, marginBottom: 6 }}>
               W · Reason ↔ Truth
@@ -184,8 +209,9 @@ export default function Home() {
 
         {/* META */}
         <div style={{ marginTop: 20, opacity: 0.45, fontSize: 12 }}>
-          Turns: {session?.turns ?? 0} · Answers: {session?.answerCount ?? 0} ·
-          Silences: {session?.silenceCount ?? 0}
+          Turns: {session?.turns ?? 0} · Answers:{" "}
+          {session?.answerCount ?? 0} · Silences:{" "}
+          {session?.silenceCount ?? 0}
         </div>
       </div>
     </main>
