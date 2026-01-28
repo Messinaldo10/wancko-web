@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 
-/* =========================================================
-   AU PARSER v0.1
-========================================================= */
+/* ================= AU PARSER v0.1 ================= */
 function parseAU(input) {
   const text = input.toLowerCase();
 
@@ -30,99 +28,29 @@ function parseAU(input) {
   return { mode, screen, matrix, intervention, N_level };
 }
 
-/* =========================================================
-   JURAMENTO AU v0 (INCLINACIÓN, NO BLOQUEO)
-========================================================= */
+/* ================= JURAMENTO ================= */
 function applyJuramento(au, juramento) {
   if (!juramento) return au;
 
   const j = juramento.toLowerCase();
   const next = { ...au };
 
-  if (["disciplina", "límites", "focus"].includes(j)) {
+  if (["disciplina", "límites"].includes(j)) {
     if (next.matrix === "3412") next.matrix = "1234";
-    if (next.N_level === "N3") next.N_level = "N2";
   }
 
-  if (["ansiedad", "excesos", "burnout"].includes(j)) {
+  if (["ansiedad", "excesos"].includes(j)) {
     if (next.matrix === "1234") next.matrix = "2143";
-    if (next.N_level === "N1") next.N_level = "N2";
   }
 
-  if (["soltar", "cerrar", "cerrar ciclo"].includes(j)) {
+  if (["soltar"].includes(j)) {
     next.matrix = "4321";
   }
 
   return next;
 }
 
-/* =========================================================
-   STRATEGIC QUESTIONS (MULTILENGUA)
-========================================================= */
-const SQ = {
-  en: {
-    release: "What are you trying to release, exactly?",
-    invert: "What flips if you assume the opposite is true for one minute?",
-    stop: "What is the smallest thing you can stop feeding today?",
-    rule: "What would be the simplest rule that everyone could actually follow?",
-    groupAssumption: "Which assumption in the group is carrying the most tension?",
-    collective: "What changes first if the collective goal becomes clearer than the individual one?",
-    step: "What is the next concrete step that costs the least and proves direction?",
-    belief: "What is the one belief you’re protecting that might be the cause?",
-    trust: "What would you stop doing if you trusted your direction?",
-    decision: "What’s the real decision you are avoiding naming?"
-  },
-  es: {
-    release: "¿Qué estás intentando soltar exactamente?",
-    invert: "¿Qué cambia si asumes que lo contrario es cierto durante un minuto?",
-    stop: "¿Qué es lo más pequeño que podrías dejar de alimentar hoy?",
-    rule: "¿Cuál sería la regla más simple que todos podrían seguir de verdad?",
-    groupAssumption: "¿Qué suposición del grupo está cargando más tensión?",
-    collective: "¿Qué cambia primero si el objetivo colectivo se vuelve más claro que el individual?",
-    step: "¿Cuál es el siguiente paso concreto que cuesta menos y demuestra dirección?",
-    belief: "¿Qué creencia estás protegiendo que podría ser la causa?",
-    trust: "¿Qué dejarías de hacer si confiaras en tu dirección?",
-    decision: "¿Qué decisión real estás evitando nombrar?"
-  },
-  ca: {
-    release: "Què estàs intentant deixar anar exactament?",
-    invert: "Què canvia si assumes que el contrari és cert durant un minut?",
-    stop: "Quina és la cosa més petita que podries deixar d’alimentar avui?",
-    rule: "Quina seria la norma més simple que tothom podria seguir de veritat?",
-    groupAssumption: "Quina suposició del grup carrega més tensió?",
-    collective: "Què canvia primer si l’objectiu col·lectiu esdevé més clar que l’individual?",
-    step: "Quin és el següent pas concret que costa menys i demostra direcció?",
-    belief: "Quina creença estàs protegint que podria ser la causa?",
-    trust: "Què deixaries de fer si confiessis en la teva direcció?",
-    decision: "Quina decisió real estàs evitant anomenar?"
-  }
-};
-
-function strategicQuestion(au, lang) {
-  const L = SQ[lang] ? lang : "en";
-  const { mode, screen, matrix } = au;
-
-  if (screen === "DCN") {
-    if (matrix === "4321") return SQ[L].release;
-    if (matrix === "2143") return SQ[L].invert;
-    return SQ[L].stop;
-  }
-
-  if (mode === "GM") {
-    if (matrix === "1234") return SQ[L].rule;
-    if (matrix === "2143") return SQ[L].groupAssumption;
-    return SQ[L].collective;
-  }
-
-  if (matrix === "1234") return SQ[L].step;
-  if (matrix === "2143") return SQ[L].belief;
-  if (matrix === "4321") return SQ[L].trust;
-  return SQ[L].decision;
-}
-
-/* =========================================================
-   SIGNALS
-========================================================= */
+/* ================= SIGNALS ================= */
 function auSignals(au) {
   let tone = "amber";
   if (au.N_level === "N3") tone = "green";
@@ -137,19 +65,17 @@ function auSignals(au) {
   return { tone, W };
 }
 
-/* =========================================================
-   SESSION (ARPI META ONLY)
-========================================================= */
+/* ================= SESSION ================= */
 function nextSession(prev, au, juramento) {
   const base = prev && typeof prev === "object" ? prev : {};
   const chain = Array.isArray(base.chain) ? base.chain : [];
 
-  const next = {
+  return {
     v: 1,
     juramento: juramento || base.juramento || null,
     turns: (base.turns || 0) + 1,
-    silenceCount: base.silenceCount || 0,
-    answerCount: base.answerCount || 0,
+    silenceCount: au.intervention === "Silence" ? (base.silenceCount || 0) + 1 : base.silenceCount || 0,
+    answerCount: au.intervention !== "Silence" ? (base.answerCount || 0) + 1 : base.answerCount || 0,
     last: au,
     chain: [
       ...chain.slice(-49),
@@ -163,16 +89,9 @@ function nextSession(prev, au, juramento) {
       }
     ]
   };
-
-  if (au.intervention === "Silence") next.silenceCount += 1;
-  else next.answerCount += 1;
-
-  return next;
 }
 
-/* =========================================================
-   API
-========================================================= */
+/* ================= API ================= */
 export async function POST(req) {
   try {
     const { input, session, juramento } = await req.json();
@@ -196,14 +115,6 @@ export async function POST(req) {
       });
     }
 
-    if (au.intervention === "StrategicQuestion") {
-      return NextResponse.json({
-        output: strategicQuestion(au, lang),
-        au: { ...au, signals },
-        session: newSession
-      });
-    }
-
     const prompt = `
 MODE: ${au.mode}
 SCREEN: ${au.screen}
@@ -222,7 +133,7 @@ ${input}
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: \`Bearer \${process.env.OPENAI_API_KEY}\`,
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -234,14 +145,6 @@ ${input}
         temperature: 0.3
       })
     });
-
-    if (!res.ok) {
-      return NextResponse.json({
-        output: "I am here. Say a little more.",
-        au: { ...au, signals },
-        session: newSession
-      });
-    }
 
     const data = await res.json();
     const content = data?.choices?.[0]?.message?.content?.trim();
@@ -260,3 +163,4 @@ ${input}
     });
   }
 }
+
