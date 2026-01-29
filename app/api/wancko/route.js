@@ -1,42 +1,66 @@
 import { NextResponse } from "next/server";
 
-/** ---------- AU PARSER v0.3 ---------- */
+/** ---------- AU PARSER v0.3.1 ---------- */
 function parseAU(input) {
-  const text = input.toLowerCase();
+  const text = input.toLowerCase().trim();
 
+  // MODE
   const mode = text.includes("we") || text.includes("they") ? "GM" : "GC";
-  const screen = text.includes("tired") || text.includes("empty") ? "DCN" : "RAV";
 
+  // SCREEN
+  const screen =
+    /(tired|empty|burnout|agotad|vac[ií]o|cansad)/.test(text)
+      ? "DCN"
+      : "RAV";
+
+  // MATRIX (por defecto continuidad)
   let matrix = "3412";
 
-  // estructura
+  // 1234 — estructura / norma
   if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) {
     matrix = "1234";
   }
-  // inversión
-  else if (/(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text)) {
+
+  // 2143 — inversión / ontología / duda
+  else if (
+    /(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text) ||
+    /\?$/.test(text) ||
+    /(qué es|que es|what is|què és)/.test(text)
+  ) {
     matrix = "2143";
   }
-  // disolución
-  else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
+
+  // 4321 — disolución
+  else if (
+    /(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(
+      text
+    )
+  ) {
     matrix = "4321";
   }
 
+  // N LEVEL
   let N_level = "N3";
-  if (text.includes("panic") || text.includes("obsessed")) N_level = "N1";
-  if (text.includes("harm") || text.includes("force")) N_level = "N0";
 
+  if (/(panic|obsessed|ansiedad|obses)/.test(text)) N_level = "N1";
+  if (/(harm|force|violence|dañar|forzar)/.test(text)) N_level = "N0";
+
+  // degradación suave por repetición conceptual
+  if (/\?$/.test(text) && text.length < 40 && N_level === "N3") {
+    N_level = "N2";
+  }
+
+  // INTERVENTION
   let intervention = "Answer";
   if (N_level === "N0" || N_level === "N1") intervention = "Silence";
   else if (text.includes("?")) intervention = "StrategicQuestion";
 
-  // Operador de sentido
   const sense = matrix === "2143" ? "inverse" : "direct";
 
   return { mode, screen, matrix, sense, intervention, N_level };
 }
 
-/** ---------- STRATEGIC QUESTIONS (MULTILENGUA) ---------- */
+/** ---------- STRATEGIC QUESTIONS ---------- */
 const SQ = {
   en: {
     release: "What are you trying to release, exactly?",
@@ -98,18 +122,8 @@ function strategicQuestion(au, lang) {
   return SQ[L].decision;
 }
 
-/** ---------- W (Reason ↔ Truth) proxy v0.1 ---------- */
-function computeW(input, au) {
-  // v0.1: solo señales por tipo de matriz (estable y visible)
-  if (au.matrix === "1234") return 0.35;
-  if (au.matrix === "2143") return 0.55;
-  if (au.matrix === "4321") return 0.65;
-  return 0.5; // 3412
-}
-
-/** ---------- GRADIENTE AU + señales ---------- */
-function auSignals(au, session, input) {
-  // d base por matriz
+/** ---------- GRADIENTE AU ---------- */
+function auSignals(au, session) {
   let d =
     au.matrix === "1234" ? 0.2 :
     au.matrix === "3412" ? 0.45 :
@@ -117,44 +131,34 @@ function auSignals(au, session, input) {
     au.matrix === "4321" ? 0.75 :
     0.45;
 
-  // ajuste por screen
   if (au.screen === "DCN") d += 0.1;
 
-  // clamp
   d = Math.max(0, Math.min(1, d));
 
-  // tono por d (continuidad/ruptura)
   let tone = "amber";
   if (d < 0.3) tone = "green";
   if (d > 0.65) tone = "red";
 
-  // W
-  const W = computeW(input, au);
-
-  // anti-loop base (simple)
   let anti = null;
-  if (session?.last?.matrix === au.matrix && session?.last?.sense === au.sense) {
-    anti = "hold";
-  }
+  if (session?.last?.matrix === au.matrix) anti = "hold";
 
-  return { d, tone, W, sense: au.sense, anti };
+  return { d, tone, sense: au.sense, anti };
 }
 
-/** ---------- SESSION (ARPI meta only) ---------- */
+/** ---------- SESSION ---------- */
 function nextSession(prev, au, signals) {
   const base = prev && typeof prev === "object" ? prev : {};
   const chain = Array.isArray(base.chain) ? base.chain : [];
 
-  const next = {
+  return {
     v: 1,
     turns: (base.turns || 0) + 1,
     silenceCount: base.silenceCount || 0,
     answerCount: base.answerCount || 0,
-    last: { matrix: au.matrix, sense: au.sense, N: au.N_level, d: signals.d, intent: au.intervention },
+    last: { ...au, signals },
     chain: [
-      ...chain.slice(-19),
+      ...chain.slice(-4),
       {
-        t: Date.now(),
         matrix: au.matrix,
         sense: au.sense,
         N: au.N_level,
@@ -163,122 +167,69 @@ function nextSession(prev, au, signals) {
       }
     ]
   };
-
-  return next;
 }
 
-/** ---------- ANTI-LOOP AU v1 ---------- */
+/** ---------- ANTI-LOOP ---------- */
 function antiLoopDecision(session) {
   if (!session || !Array.isArray(session.chain)) return null;
   const c = session.chain;
 
-  // mismo patrón 3 veces seguidas
   if (
     c.length >= 3 &&
     c[c.length - 1].matrix === c[c.length - 2].matrix &&
-    c[c.length - 2].matrix === c[c.length - 3].matrix &&
-    c[c.length - 1].sense === c[c.length - 2].sense
-  ) {
-    return "shorten";
-  }
-
-  // N1 dos veces en ventana
-  const last5 = c.slice(-5);
-  if (last5.filter(x => x.N === "N1").length >= 2) {
-    return "silence";
-  }
-
-  // d no se mueve (bloqueo suave)
-  if (
-    c.length >= 3 &&
-    Math.abs(c[c.length - 1].d - c[c.length - 3].d) < 0.1
+    c[c.length - 2].matrix === c[c.length - 3].matrix
   ) {
     return "invert";
+  }
+
+  if (c.filter(x => x.N === "N1").length >= 2) {
+    return "silence";
   }
 
   return null;
 }
 
-/** ---------- ARPI (inicio de certificación, sin datos) ---------- */
-function computeARPI(session) {
-  if (!session || !Array.isArray(session.chain)) return { level: "seed" };
-
-  if ((session.turns || 0) < 3) return { level: "seed" };
-
-  const last7 = session.chain.slice(-7);
-  const hasN0 = last7.some(x => x.N === "N0");
-  const n1count = last7.filter(x => x.N === "N1").length;
-
-  if (hasN0) return { level: "blocked" };
-  if (n1count >= 2) return { level: "unstable" };
-
-  // criterio simple: suficiente historial sin bloqueos
-  if ((session.turns || 0) >= 7) return { level: "ok" };
-
-  return { level: "seed" };
-}
-
 /** ---------- API ---------- */
 export async function POST(req) {
   try {
-    const body = await req.json();
-    const input = body?.input;
-    const session = body?.session || null;
-
+    const { input, session } = await req.json();
     if (!input || input.trim().length < 3) {
-      return NextResponse.json({ output: null, au: null, session, cert: { level: "seed" } });
+      return NextResponse.json({ output: null, au: null, session });
     }
 
     const lang = req.headers.get("accept-language")?.slice(0, 2) || "en";
 
     const au = parseAU(input);
-
-    // IMPORTANT: signals necesita session + input
-    const signals = auSignals(au, session, input);
-
+    const signals = auSignals(au, session);
     let newSession = nextSession(session, au, signals);
 
-    // anti-loop se decide con sesión ya actualizada
     const anti = antiLoopDecision(newSession);
 
-    // si anti == invert, forzamos lectura inversa (sin cambiar matrix)
-    const effectiveSense = anti === "invert" ? "inverse" : au.sense;
-
-    const effectiveAu = { ...au, sense: effectiveSense };
-    const effectiveSignals = { ...signals, sense: effectiveSense, anti };
-
-    // SILENCIO (AU / anti-loop)
-    if (effectiveAu.intervention === "Silence" || anti === "silence") {
+    // SILENCE
+    if (au.intervention === "Silence" || anti === "silence") {
       newSession.silenceCount += 1;
-      const cert = computeARPI(newSession);
       return NextResponse.json({
         output: "—",
-        au: { ...effectiveAu, signals: effectiveSignals },
-        session: newSession,
-        cert
+        au: { ...au, signals, anti },
+        session: newSession
       });
     }
 
-    // PREGUNTA ESTRATÉGICA
-    if (effectiveAu.intervention === "StrategicQuestion") {
-      let q = strategicQuestion(effectiveAu, lang);
-      if (anti === "shorten") q = q.split("?")[0] + "?";
-      newSession.answerCount += 1;
-      const cert = computeARPI(newSession);
+    // STRATEGIC QUESTION
+    if (au.intervention === "StrategicQuestion") {
       return NextResponse.json({
-        output: q,
-        au: { ...effectiveAu, signals: effectiveSignals },
-        session: newSession,
-        cert
+        output: strategicQuestion(au, lang),
+        au: { ...au, signals, anti },
+        session: newSession
       });
     }
 
     // ANSWER (OpenAI)
     const prompt = `
-MODE: ${effectiveAu.mode}
-SCREEN: ${effectiveAu.screen}
-MATRIX: ${effectiveAu.matrix}
-SENSE: ${effectiveAu.sense}
+MODE: ${au.mode}
+SCREEN: ${au.screen}
+MATRIX: ${au.matrix}
+SENSE: ${au.sense}
 
 RULES:
 - No advice
@@ -306,31 +257,17 @@ ${input}
       })
     });
 
-    if (!res.ok) {
-      newSession.answerCount += 1;
-      const cert = computeARPI(newSession);
-      return NextResponse.json({
-        output: "—",
-        au: { ...effectiveAu, signals: effectiveSignals },
-        session: newSession,
-        cert
-      });
-    }
-
     const data = await res.json();
     let out = data?.choices?.[0]?.message?.content?.trim() || "—";
-    if (anti === "shorten") out = out.split(".")[0] + ".";
 
     newSession.answerCount += 1;
-    const cert = computeARPI(newSession);
 
     return NextResponse.json({
       output: out,
-      au: { ...effectiveAu, signals: effectiveSignals },
-      session: newSession,
-      cert
+      au: { ...au, signals, anti },
+      session: newSession
     });
   } catch {
-    return NextResponse.json({ output: "—", au: null, session: null, cert: { level: "seed" } });
+    return NextResponse.json({ output: "—", au: null, session: null });
   }
 }
