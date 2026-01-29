@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 
-/* ================= AU PARSER v0.1 ================= */
+/* ================= AU PARSER ================= */
 function parseAU(input) {
   const text = input.toLowerCase();
 
   const mode = text.includes("we") || text.includes("they") ? "GM" : "GC";
-  const screen = text.includes("tired") || text.includes("empty") ? "DCN" : "RAV";
+  const screen =
+    /(tired|empty|burnout|agotado|vacío|cansado)/.test(text) ? "DCN" : "RAV";
 
   let matrix = "3412";
 
@@ -18,8 +19,8 @@ function parseAU(input) {
   }
 
   let N_level = "N3";
-  if (text.includes("harm") || text.includes("force")) N_level = "N0";
-  if (text.includes("panic") || text.includes("obsessed")) N_level = "N1";
+  if (/(harm|violence|force|dañar|forzar)/.test(text)) N_level = "N0";
+  else if (/(panic|obsessed|anxiety|pánico|obsesión|ansiedad)/.test(text)) N_level = "N1";
 
   let intervention = "Answer";
   if (N_level === "N0" || N_level === "N1") intervention = "Silence";
@@ -31,82 +32,100 @@ function parseAU(input) {
 /* ================= JURAMENTO ================= */
 function applyJuramento(au, juramento) {
   if (!juramento) return au;
-
   const j = juramento.toLowerCase();
   const next = { ...au };
 
   if (["disciplina", "límites"].includes(j)) {
     if (next.matrix === "3412") next.matrix = "1234";
   }
-
   if (["ansiedad", "excesos"].includes(j)) {
     if (next.matrix === "1234") next.matrix = "2143";
   }
-
   if (["soltar"].includes(j)) {
     next.matrix = "4321";
+    next.screen = "DCN";
   }
-
   return next;
 }
 
-/* ================= SIGNALS ================= */
-function auSignals(au) {
-  let tone = "amber";
-  if (au.N_level === "N3") tone = "green";
-  if (au.N_level === "N1" || au.N_level === "N0") tone = "red";
+/* ================= GRADIENTES AU REALES ================= */
+function auSignals(au, prev) {
+  // Gradiente DCN↔RAV (no binario)
+  let depth = au.screen === "DCN" ? 0.75 : 0.25;
+  if (prev?.last?.screen === "DCN" && au.screen === "RAV") depth = 0.45;
 
-  const W =
+  // W dinámico
+  let W =
     au.matrix === "1234" ? 0.35 :
     au.matrix === "2143" ? 0.55 :
     au.matrix === "4321" ? 0.65 :
     0.5;
 
-  return { tone, W };
+  // Ajuste por N
+  if (au.N_level === "N1") W += 0.05;
+  if (au.N_level === "N0") W += 0.1;
+
+  let tone = "amber";
+  if (depth < 0.35) tone = "green";
+  if (depth > 0.65) tone = "red";
+
+  return { tone, W, depth };
 }
 
-/* ================= SESSION ================= */
-function nextSession(prev, au, juramento) {
+/* ================= ARPI (META-CADENA) ================= */
+function arpiMeta(prev, au, signals) {
   const base = prev && typeof prev === "object" ? prev : {};
   const chain = Array.isArray(base.chain) ? base.chain : [];
 
   return {
     v: 1,
-    juramento: juramento || base.juramento || null,
     turns: (base.turns || 0) + 1,
-    silenceCount: au.intervention === "Silence" ? (base.silenceCount || 0) + 1 : base.silenceCount || 0,
-    answerCount: au.intervention !== "Silence" ? (base.answerCount || 0) + 1 : base.answerCount || 0,
     last: au,
     chain: [
       ...chain.slice(-49),
       {
         t: Date.now(),
-        mode: au.mode,
-        screen: au.screen,
-        matrix: au.matrix,
-        N: au.N_level,
-        intent: au.intervention
+        m: au.mode,
+        s: au.screen,
+        x: au.matrix,
+        n: au.N_level,
+        w: Number(signals.W.toFixed(2)),
+        d: Number(signals.depth.toFixed(2))
       }
     ]
   };
 }
 
+/* ================= INTERPRETACIÓN HISTÓRICA ================= */
+function interpretHistorical(historicalText, au) {
+  // No empatía, no terapia: interpretación AU directa
+  if (au.matrix === "1234") {
+    return "The historical voice points to a lack of structure, not emotion.";
+  }
+  if (au.matrix === "2143") {
+    return "The contrast reveals an assumption you have not inverted yet.";
+  }
+  if (au.matrix === "4321") {
+    return "This is a signal to release control, not to seek explanation.";
+  }
+  return "The contrast highlights movement without direction.";
+}
+
 /* ================= API ================= */
 export async function POST(req) {
   try {
-    const { input, session, juramento } = await req.json();
+    const { input, session, juramento, historical } = await req.json();
     if (!input || input.trim().length < 3) {
       return NextResponse.json({ output: null, au: null, session });
     }
 
-    const lang = req.headers.get("accept-language")?.slice(0, 2) || "en";
-
     let au = parseAU(input);
     au = applyJuramento(au, juramento);
 
-    const signals = auSignals(au);
-    const newSession = nextSession(session, au, juramento);
+    const signals = auSignals(au, session);
+    const newSession = arpiMeta(session, au, signals);
 
+    // SILENCIO
     if (au.intervention === "Silence") {
       return NextResponse.json({
         output: "I am listening. Continue.",
@@ -115,6 +134,17 @@ export async function POST(req) {
       });
     }
 
+    // INTERPRETACIÓN HISTÓRICA (doble acto)
+    if (historical) {
+      const interpreted = interpretHistorical(historical, au);
+      return NextResponse.json({
+        output: interpreted,
+        au: { ...au, signals },
+        session: newSession
+      });
+    }
+
+    // RESPUESTA NORMAL (OpenAI)
     const prompt = `
 MODE: ${au.mode}
 SCREEN: ${au.screen}
@@ -123,7 +153,7 @@ MATRIX: ${au.matrix}
 RULES:
 - No advice
 - No reassurance
-- One short intervention
+- One closed intervention
 - Max 90 words
 
 USER:
@@ -155,12 +185,7 @@ ${input}
       session: newSession
     });
   } catch (e) {
-    console.error("Wancko API error:", e);
-    return NextResponse.json({
-      output: "I am here.",
-      au: null,
-      session: null
-    });
+    console.error(e);
+    return NextResponse.json({ output: "I am here.", au: null, session: null });
   }
 }
-
