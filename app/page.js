@@ -10,6 +10,11 @@ export default function Home() {
   const [au, setAu] = useState(null);
   const [session, setSession] = useState(null);
   const [juramento, setJuramento] = useState(null);
+
+  // ✅ NUEVO: selector de modo + arquetipo histórico
+  const [mode, setMode] = useState("wancko"); // "wancko" | "historical"
+  const [archetype, setArchetype] = useState("estoic");
+
   const [loading, setLoading] = useState(false);
 
   /* ---------------- SESSION ---------------- */
@@ -57,20 +62,31 @@ export default function Home() {
     setOutput(null);
 
     try {
-      const res = await fetch("/api/wancko", {
+      // ✅ NUEVO: endpoint + payload según modo
+      const endpoint = mode === "historical" ? "/api/h-wancko" : "/api/wancko";
+
+      const payload =
+        mode === "historical"
+          ? { input, archetype }
+          : { input, juramento, session: session || null };
+
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          input,
-          juramento,
-          session: session || null
-        })
+        body: JSON.stringify(payload)
       });
 
       const data = await res.json();
+
       setOutput(data.output === null ? "—" : data.output);
-      setAu(data.au || null);
-      setSession(data.session || null);
+
+      // ✅ en modo histórico no hay AU strip (lo dejamos limpio)
+      if (mode === "historical") {
+        setAu(null);
+      } else {
+        setAu(data.au || null);
+        setSession(data.session || null);
+      }
     } catch {
       setOutput("Wancko could not respond.");
     } finally {
@@ -97,65 +113,106 @@ export default function Home() {
           Natural assistant aligned with AU.
         </p>
 
-        {/* JURAMENTO */}
-        <select
-          value={juramento || ""}
-          onChange={(e) => setJuramento(e.target.value || null)}
-          style={{
-            marginTop: 22,
-            padding: 10,
-            background: "rgba(0,0,0,0.35)",
-            color: "#eaeaea",
-            borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.15)"
-          }}
-        >
-          <option value="">No juramento</option>
-          <option value="disciplina">Disciplina</option>
-          <option value="ansiedad">Ansiedad</option>
-          <option value="límites">Límites</option>
-          <option value="excesos">Excesos</option>
-          <option value="soltar">Soltar</option>
-        </select>
+        {/* ✅ NUEVO: MODO */}
+        <div style={{ marginTop: 18, display: "flex", gap: 12 }}>
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value)}
+            style={{
+              padding: 10,
+              background: "rgba(0,0,0,0.35)",
+              color: "#eaeaea",
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.15)"
+            }}
+          >
+            <option value="wancko">Wancko</option>
+            <option value="historical">H-Wancko</option>
+          </select>
 
-        {/* AU STRIP */}
-        <div style={{ marginTop: 22, opacity: 0.85, fontSize: 13 }}>
-          <div>
-            <span style={{ opacity: 0.6 }}>Mode:</span> {au?.mode || "—"} ·{" "}
-            <span style={{ opacity: 0.6 }}>Screen:</span> {au?.screen || "—"} ·{" "}
-            <span style={{ opacity: 0.6 }}>Matrix:</span> {au?.matrix || "—"} ·{" "}
-            <span style={{ opacity: 0.6 }}>N:</span> {au?.N_level || "—"}
-          </div>
-
-          {/* W BAR */}
-          <div style={{ marginTop: 12 }}>
-            <div style={{ opacity: 0.6, marginBottom: 6 }}>
-              W · Reason ↔ Truth
-            </div>
-            <div
+          {mode === "historical" && (
+            <select
+              value={archetype}
+              onChange={(e) => setArchetype(e.target.value)}
               style={{
-                height: 10,
-                background: "rgba(255,255,255,0.15)",
-                borderRadius: 999,
-                position: "relative"
+                padding: 10,
+                background: "rgba(0,0,0,0.35)",
+                color: "#eaeaea",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.15)"
               }}
             >
+              <option value="estoic">Estoic</option>
+              <option value="mystic">Mystic</option>
+              <option value="warrior">Warrior</option>
+              <option value="poet">Poet</option>
+            </select>
+          )}
+        </div>
+
+        {/* JURAMENTO (solo Wancko) */}
+        {mode === "wancko" && (
+          <select
+            value={juramento || ""}
+            onChange={(e) => setJuramento(e.target.value || null)}
+            style={{
+              marginTop: 16,
+              padding: 10,
+              background: "rgba(0,0,0,0.35)",
+              color: "#eaeaea",
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.15)"
+            }}
+          >
+            <option value="">No juramento</option>
+            <option value="disciplina">Disciplina</option>
+            <option value="ansiedad">Ansiedad</option>
+            <option value="límites">Límites</option>
+            <option value="excesos">Excesos</option>
+            <option value="soltar">Soltar</option>
+          </select>
+        )}
+
+        {/* AU STRIP (solo Wancko) */}
+        {mode === "wancko" && (
+          <div style={{ marginTop: 22, opacity: 0.85, fontSize: 13 }}>
+            <div>
+              <span style={{ opacity: 0.6 }}>Mode:</span> {au?.mode || "—"} ·{" "}
+              <span style={{ opacity: 0.6 }}>Screen:</span> {au?.screen || "—"} ·{" "}
+              <span style={{ opacity: 0.6 }}>Matrix:</span> {au?.matrix || "—"} ·{" "}
+              <span style={{ opacity: 0.6 }}>N:</span> {au?.N_level || "—"}
+            </div>
+
+            {/* W BAR */}
+            <div style={{ marginTop: 12 }}>
+              <div style={{ opacity: 0.6, marginBottom: 6 }}>
+                W · Reason ↔ Truth
+              </div>
               <div
                 style={{
-                  position: "absolute",
-                  left: `${w * 100}%`,
-                  top: -4,
-                  width: 18,
-                  height: 18,
-                  borderRadius: "50%",
-                  background: "#fff",
-                  transform: "translateX(-50%)",
-                  transition: "left 500ms ease"
+                  height: 10,
+                  background: "rgba(255,255,255,0.15)",
+                  borderRadius: 999,
+                  position: "relative"
                 }}
-              />
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    left: `${w * 100}%`,
+                    top: -4,
+                    width: 18,
+                    height: 18,
+                    borderRadius: "50%",
+                    background: "#fff",
+                    transform: "translateX(-50%)",
+                    transition: "left 500ms ease"
+                  }}
+                />
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* INPUT */}
         <textarea
@@ -207,12 +264,14 @@ export default function Home() {
           {output}
         </div>
 
-        {/* META */}
-        <div style={{ marginTop: 20, opacity: 0.45, fontSize: 12 }}>
-          Turns: {session?.turns ?? 0} · Answers:{" "}
-          {session?.answerCount ?? 0} · Silences:{" "}
-          {session?.silenceCount ?? 0}
-        </div>
+        {/* META (solo Wancko) */}
+        {mode === "wancko" && (
+          <div style={{ marginTop: 20, opacity: 0.45, fontSize: 12 }}>
+            Turns: {session?.turns ?? 0} · Answers:{" "}
+            {session?.answerCount ?? 0} · Silences:{" "}
+            {session?.silenceCount ?? 0}
+          </div>
+        )}
       </div>
     </main>
   );
