@@ -14,8 +14,7 @@ export default function Home() {
   const [mode, setMode] = useState("wancko"); // wancko | historical
   const [archetype, setArchetype] = useState("estoic");
 
-  const [cert, setCert] = useState(null); // { level }
-
+  const [cert, setCert] = useState(null);
   const [loading, setLoading] = useState(false);
 
   /* ---------------- SESSION ---------------- */
@@ -37,12 +36,12 @@ export default function Home() {
     } catch {}
   }, [session]);
 
-  /* ---------------- AU VISUAL ---------------- */
+  /* ---------------- AU GRADIENT ---------------- */
+
+  const d = au?.signals?.d ?? 0.45;
+  const tone = au?.signals?.tone || "amber";
 
   const bg = useMemo(() => {
-    const tone = au?.signals?.tone || "amber";
-    const d = au?.signals?.d ?? 0.45;
-
     if (tone === "green") {
       return `radial-gradient(circle at ${d * 100}% 40%, #0e3a22, #07160f 60%)`;
     }
@@ -50,22 +49,18 @@ export default function Home() {
       return `radial-gradient(circle at ${d * 100}% 40%, #3a0e0e, #1a0707 60%)`;
     }
     return `radial-gradient(circle at ${d * 100}% 40%, #3a3216, #14110b 60%)`;
-  }, [au]);
-
-  /* ---------------- GRADIENTE AU ---------------- */
-
-  const d = au?.signals?.d ?? null;
-  const w = au?.signals?.W ?? 0.5;
+  }, [d, tone]); // 🔑 CLAVE: dependencias explícitas
 
   const gradientLabel = useMemo(() => {
-    if (d === null) return "—";
     if (d < 0.3) return "Continuidad";
     if (d < 0.6) return "Crepúsculo";
     return "Ruptura";
   }, [d]);
 
   const senseLabel =
-    au?.signals?.sense === "inverse" ? "lectura inversa" : "lectura directa";
+    au?.signals?.sense === "inverse"
+      ? "lectura inversa (2143)"
+      : "lectura directa";
 
   /* ---------------- SUBMIT ---------------- */
 
@@ -78,7 +73,6 @@ export default function Home() {
     try {
       let historicalText = null;
 
-      // 1) H-WANCKO (acto 1)
       if (mode === "historical") {
         const hRes = await fetch("/api/h-wancko", {
           method: "POST",
@@ -89,7 +83,6 @@ export default function Home() {
         historicalText = hData.output || "";
       }
 
-      // 2) WANCKO (acto 2)
       const wRes = await fetch("/api/wancko", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -134,7 +127,7 @@ export default function Home() {
         color: "#eaeaea",
         fontFamily: "system-ui",
         padding: "72px 24px",
-        transition: "background 600ms ease"
+        transition: "background 500ms ease"
       }}
     >
       <div style={{ maxWidth: 760, margin: "0 auto" }}>
@@ -143,35 +136,15 @@ export default function Home() {
           Natural assistant aligned with AU.
         </p>
 
-        {/* MODO */}
+        {/* MODE */}
         <div style={{ marginTop: 18, display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <select
-            value={mode}
-            onChange={(e) => setMode(e.target.value)}
-            style={{
-              padding: 10,
-              background: "rgba(0,0,0,0.35)",
-              color: "#eaeaea",
-              borderRadius: 10,
-              border: "1px solid rgba(255,255,255,0.15)"
-            }}
-          >
+          <select value={mode} onChange={(e) => setMode(e.target.value)}>
             <option value="wancko">Wancko</option>
             <option value="historical">H-Wancko</option>
           </select>
 
           {mode === "historical" && (
-            <select
-              value={archetype}
-              onChange={(e) => setArchetype(e.target.value)}
-              style={{
-                padding: 10,
-                background: "rgba(0,0,0,0.35)",
-                color: "#eaeaea",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.15)"
-              }}
-            >
+            <select value={archetype} onChange={(e) => setArchetype(e.target.value)}>
               <option value="estoic">Estoic</option>
               <option value="mystic">Mystic</option>
               <option value="warrior">Warrior</option>
@@ -179,19 +152,7 @@ export default function Home() {
             </select>
           )}
 
-          {/* ARPI */}
-          <div
-            style={{
-              padding: "10px 12px",
-              borderRadius: 999,
-              border: "1px solid rgba(255,255,255,0.14)",
-              background: "rgba(0,0,0,0.25)",
-              fontSize: 13,
-              opacity: 0.9
-            }}
-          >
-            {certText}
-          </div>
+          <div>{certText}</div>
         </div>
 
         {/* JURAMENTO */}
@@ -199,14 +160,6 @@ export default function Home() {
           <select
             value={juramento || ""}
             onChange={(e) => setJuramento(e.target.value || null)}
-            style={{
-              marginTop: 16,
-              padding: 10,
-              background: "rgba(0,0,0,0.35)",
-              color: "#eaeaea",
-              borderRadius: 10,
-              border: "1px solid rgba(255,255,255,0.15)"
-            }}
           >
             <option value="">No juramento</option>
             <option value="disciplina">Disciplina</option>
@@ -217,58 +170,29 @@ export default function Home() {
           </select>
         )}
 
-        {/* AU STRIP + GRADIENTE + W */}
+        {/* AU STRIP */}
         {au && (
-          <div style={{ marginTop: 22, opacity: 0.9, fontSize: 13 }}>
+          <div style={{ marginTop: 22, fontSize: 13 }}>
             <div>
-              <span style={{ opacity: 0.6 }}>Mode:</span> {au.mode} ·{" "}
-              <span style={{ opacity: 0.6 }}>Screen:</span> {au.screen} ·{" "}
-              <span style={{ opacity: 0.6 }}>Matrix:</span> {au.matrix} ·{" "}
-              <span style={{ opacity: 0.6 }}>N:</span> {au.N_level}
+              Mode: {au.mode} · Screen: {au.screen} · Matrix: {au.matrix} · N:{" "}
+              {au.N_level}
             </div>
 
-            <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <div style={{ opacity: 0.6 }}>Gradiente AU:</div>
-              <div
-                style={{
-                  padding: "6px 10px",
-                  borderRadius: 999,
-                  border: "1px solid rgba(255,255,255,0.14)",
-                  background: "rgba(0,0,0,0.25)"
-                }}
-              >
-                {gradientLabel}{d !== null ? ` · d=${d.toFixed(2)}` : ""}
-              </div>
-
-              <div style={{ opacity: 0.6 }}>{senseLabel}</div>
-
-              {au.signals?.anti && (
-                <div style={{ opacity: 0.6 }}>anti-loop: {au.signals.anti}</div>
-              )}
+            <div style={{ marginTop: 8 }}>
+              Gradiente AU: {gradientLabel} · d={d.toFixed(2)} · {senseLabel}
+              {au.signals?.anti && ` · anti-loop: ${au.signals.anti}`}
             </div>
 
-            {/* W BAR (vuelve a estar) */}
-            <div style={{ marginTop: 12 }}>
-              <div style={{ opacity: 0.6, marginBottom: 6 }}>W · Reason ↔ Truth</div>
-              <div
-                style={{
-                  height: 10,
-                  background: "rgba(255,255,255,0.15)",
-                  borderRadius: 999,
-                  position: "relative"
-                }}
-              >
+            {/* BARRA GRADIENTE */}
+            <div style={{ marginTop: 10 }}>
+              <div style={{ height: 8, background: "rgba(255,255,255,0.15)" }}>
                 <div
                   style={{
-                    position: "absolute",
-                    left: `${w * 100}%`,
-                    top: -4,
-                    width: 18,
-                    height: 18,
-                    borderRadius: "50%",
-                    background: "#fff",
-                    transform: "translateX(-50%)",
-                    transition: "left 500ms ease"
+                    width: `${d * 100}%`,
+                    height: "100%",
+                    background:
+                      d < 0.3 ? "#3ddc97" : d > 0.65 ? "#ff5f5f" : "#ffd36a",
+                    transition: "width 400ms ease"
                   }}
                 />
               </div>
@@ -280,54 +204,19 @@ export default function Home() {
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Expose what matters."
           rows={5}
-          style={{
-            width: "100%",
-            marginTop: 28,
-            padding: 14,
-            fontSize: 16,
-            background: "rgba(0,0,0,0.35)",
-            color: "#eaeaea",
-            border: "1px solid rgba(255,255,255,0.14)",
-            borderRadius: 12
-          }}
-          disabled={loading}
+          placeholder="Expose what matters."
         />
 
-        <button
-          onClick={submit}
-          disabled={loading}
-          style={{
-            marginTop: 14,
-            padding: "10px 16px",
-            fontSize: 16,
-            borderRadius: 12,
-            border: "1px solid rgba(255,255,255,0.18)",
-            background: "rgba(255,255,255,0.08)",
-            color: "#eaeaea",
-            cursor: "pointer"
-          }}
-        >
+        <button onClick={submit} disabled={loading}>
           {loading ? "…" : "Expose"}
         </button>
 
         {/* OUTPUT */}
-        <div
-          style={{
-            marginTop: 32,
-            minHeight: 56,
-            fontSize: 18,
-            whiteSpace: "pre-wrap",
-            opacity: output === "—" ? 0.45 : 1
-          }}
-        >
-          {output}
-        </div>
+        <div style={{ marginTop: 24, minHeight: 48 }}>{output}</div>
 
-        {/* META */}
         {au && (
-          <div style={{ marginTop: 20, opacity: 0.45, fontSize: 12 }}>
+          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.5 }}>
             Turns: {session?.turns ?? 0} · Chain: {session?.chain?.length ?? 0}
           </div>
         )}
