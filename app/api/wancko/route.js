@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server";
 
-/** ---------- AU PARSER v0.3.1 ---------- */
+/** =========================================================
+ *  WANCKO API — AU v0.4 (coherencia AU aplicada)
+ *  - Juramento modula la lectura (matriz) sin depender solo del texto
+ *  - Gradiente d y tono cambian de verdad
+ *  - Anti-loop deja de ser "hold" constante y pasa a decisiones útiles
+ *  - ARPI cert (semilla/ok/inestable/bloqueado) sin exponer datos
+ * ========================================================= */
+
+/** ---------- AU PARSER v0.3.1 (tu base) ---------- */
 function parseAU(input) {
   const text = input.toLowerCase().trim();
 
@@ -9,9 +17,7 @@ function parseAU(input) {
 
   // SCREEN
   const screen =
-    /(tired|empty|burnout|agotad|vac[ií]o|cansad)/.test(text)
-      ? "DCN"
-      : "RAV";
+    /(tired|empty|burnout|agotad|vac[ií]o|cansad)/.test(text) ? "DCN" : "RAV";
 
   // MATRIX (por defecto continuidad)
   let matrix = "3412";
@@ -32,16 +38,13 @@ function parseAU(input) {
 
   // 4321 — disolución
   else if (
-    /(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(
-      text
-    )
+    /(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)
   ) {
     matrix = "4321";
   }
 
   // N LEVEL
   let N_level = "N3";
-
   if (/(panic|obsessed|ansiedad|obses)/.test(text)) N_level = "N1";
   if (/(harm|force|violence|dañar|forzar)/.test(text)) N_level = "N0";
 
@@ -122,105 +125,290 @@ function strategicQuestion(au, lang) {
   return SQ[L].decision;
 }
 
-/** ---------- GRADIENTE AU ---------- */
-function auSignals(au, session) {
+/** =========================================================
+ *  COHERENCIA AU — Juramento como operador (núcleo)
+ *  La misma frase produce matrices distintas según juramento.
+ * ========================================================= */
+function applyJuramento(matrix, juramento, screen) {
+  if (!juramento) return matrix;
+
+  // Normalizamos algunos casos que llegan con acentos / variantes
+  const j = String(juramento).toLowerCase().trim();
+
+  if (j === "disciplina") {
+    // Disciplina empuja a estructura; si venía ruptura la baja a continuidad
+    if (matrix === "4321") return "3412";
+    return "1234";
+  }
+
+  if (j === "ansiedad") {
+    // Ansiedad lee presión/inversión casi siempre
+    if (matrix === "4321") return "2143";
+    return "2143";
+  }
+
+  if (j === "límites" || j === "limites") {
+    // Límites: evita 4321 salvo DCN; en DCN tiende a 2143 (tensión) antes de disolver
+    if (screen === "DCN") return "2143";
+    if (matrix === "4321") return "3412";
+    return matrix;
+  }
+
+  if (j === "excesos") {
+    // Excesos facilita salto a disolución si hay continuidad neutra
+    if (matrix === "3412") return "4321";
+    return matrix;
+  }
+
+  if (j === "soltar") {
+    // Soltar prioriza disolución siempre
+    return "4321";
+  }
+
+  return matrix;
+}
+
+/** ---------- util: cuenta repeticiones recientes ---------- */
+function recentRepeatCount(chain, matrix, window = 4) {
+  if (!Array.isArray(chain) || chain.length === 0) return 0;
+  const slice = chain.slice(-window);
+  let n = 0;
+  for (let i = slice.length - 1; i >= 0; i--) {
+    if (slice[i]?.matrix === matrix) n += 1;
+    else break;
+  }
+  return n;
+}
+
+/** =========================================================
+ *  ANTI-LOOP — decisiones (no “hold” constante)
+ *  - si 3 veces misma matriz -> fuerza cambio de operador
+ *  - si N1 repetido -> silencio
+ *  - si estancamiento d -> inversión
+ * ========================================================= */
+function antiLoopDecision(prevSession, currentAu) {
+  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
+  const rep = recentRepeatCount(chain, currentAu.matrix, 4);
+
+  // N1 dos veces en la ventana corta => silencio (seguridad)
+  const n1Count = chain.slice(-5).filter((x) => x?.N === "N1").length;
+  const n0Count = chain.slice(-5).filter((x) => x?.N === "N0").length;
+  if (n0Count >= 1) return "silence";
+  if (n1Count >= 2) return "silence";
+
+  // 3 repeticiones => romper bucle: invertir lectura (2143) o volver a continuidad (3412)
+  if (rep >= 3) return "break";
+
+  // Si venimos de 2143 repetido => bajar a 3412 (salir de duda)
+  const last = chain[chain.length - 1];
+  if (last?.matrix === "2143" && currentAu.matrix === "2143" && rep >= 2) return "ground";
+
+  return null;
+}
+
+/** ---------- aplica anti-loop a la matriz (controlado) ---------- */
+function applyAntiToMatrix(matrix, anti, juramento) {
+  if (!anti) return matrix;
+
+  // "break": rota entre familias sin destruir juramento
+  if (anti === "break") {
+    // Si estaba en continuidad neutra, fuerza inversión (ver el supuesto)
+    if (matrix === "3412") return "2143";
+    // Si estaba en estructura rígida, baja a continuidad (respirar)
+    if (matrix === "1234") return "3412";
+    // Si estaba en inversión, sube a estructura (cerrar)
+    if (matrix === "2143") return juramento === "ansiedad" ? "2143" : "1234";
+    // Si estaba en disolución, aterriza
+    if (matrix === "4321") return "3412";
+  }
+
+  if (anti === "ground") return "3412";
+
+  return matrix;
+}
+
+/** =========================================================
+ *  GRADIENTE AU — d, tono + W (barra)
+ *  d ya no queda fijo: se mueve por:
+ *  - matrix base
+ *  - screen
+ *  - juramento (bias)
+ *  - repetición (tensión acumulada)
+ * ========================================================= */
+function auSignals(au, prevSession, juramento) {
+  // Base por matriz
   let d =
-    au.matrix === "1234" ? 0.2 :
+    au.matrix === "1234" ? 0.20 :
     au.matrix === "3412" ? 0.45 :
-    au.matrix === "2143" ? 0.55 :
-    au.matrix === "4321" ? 0.75 :
+    au.matrix === "2143" ? 0.58 :
+    au.matrix === "4321" ? 0.80 :
     0.45;
 
-  if (au.screen === "DCN") d += 0.1;
+  // Screen empuja hacia ruptura
+  if (au.screen === "DCN") d += 0.08;
 
+  // Juramento sesga el gradiente (coherencia)
+  const j = juramento ? String(juramento).toLowerCase().trim() : "";
+  if (j === "disciplina") d -= 0.06;
+  if (j === "ansiedad") d += 0.06;
+  if (j === "excesos") d += 0.08;
+  if (j === "soltar") d += 0.12;
+  if (j === "límites" || j === "limites") d -= 0.02;
+
+  // Repetición reciente (tensión o consolidación)
+  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
+  const rep = recentRepeatCount(chain, au.matrix, 4);
+
+  // Si repites 3412/2143 sin salir, sube un poco d (tensión de bucle)
+  if (rep >= 2 && (au.matrix === "3412" || au.matrix === "2143")) d += 0.06;
+  // Si repites 1234, baja un poco (consolidación)
+  if (rep >= 2 && au.matrix === "1234") d -= 0.03;
+
+  // Clamp
   d = Math.max(0, Math.min(1, d));
 
+  // Color por d (más agresivo para que se vea)
   let tone = "amber";
-  if (d < 0.3) tone = "green";
-  if (d > 0.65) tone = "red";
+  if (d <= 0.28) tone = "green";
+  if (d >= 0.68) tone = "red";
 
-  let anti = null;
-  if (session?.last?.matrix === au.matrix) anti = "hold";
+  // W (barra reason↔truth): mapea a una zona distinta (no igual a d)
+  // 0 = razón/estructura, 1 = verdad/disolución
+  let W =
+    au.matrix === "1234" ? 0.30 :
+    au.matrix === "3412" ? 0.50 :
+    au.matrix === "2143" ? 0.62 :
+    au.matrix === "4321" ? 0.78 :
+    0.50;
 
-  return { d, tone, sense: au.sense, anti };
+  // Screen DCN empuja W hacia verdad (menos control)
+  if (au.screen === "DCN") W += 0.05;
+  // Juramento disciplina baja W, soltar la sube, ansiedad la vuelve más oscilante
+  if (j === "disciplina") W -= 0.05;
+  if (j === "soltar") W += 0.06;
+  if (j === "ansiedad") W += 0.02;
+
+  W = Math.max(0, Math.min(1, W));
+
+  return { d, tone, sense: au.sense, W };
+}
+
+/** =========================================================
+ *  ARPI CERT — sin exponer datos
+ *  - seed: <2 turnos
+ *  - ok: estable (sin N1/N0 recientes)
+ *  - unstable: N1 reciente
+ *  - blocked: N0 reciente
+ * ========================================================= */
+function arpiCert(prevSession, nextSessionObj) {
+  const turns = nextSessionObj?.turns || 0;
+  const chain = Array.isArray(nextSessionObj?.chain) ? nextSessionObj.chain : [];
+  const last5 = chain.slice(-5);
+
+  const hasN0 = last5.some((x) => x?.N === "N0");
+  const hasN1 = last5.some((x) => x?.N === "N1");
+
+  if (turns < 2) return { level: "seed" };
+  if (hasN0) return { level: "blocked" };
+  if (hasN1) return { level: "unstable" };
+  return { level: "ok" };
 }
 
 /** ---------- SESSION ---------- */
-function nextSession(prev, au, signals) {
+function nextSession(prev, au, signals, anti) {
   const base = prev && typeof prev === "object" ? prev : {};
   const chain = Array.isArray(base.chain) ? base.chain : [];
 
-  return {
+  const next = {
     v: 1,
     turns: (base.turns || 0) + 1,
     silenceCount: base.silenceCount || 0,
     answerCount: base.answerCount || 0,
-    last: { ...au, signals },
+    last: { ...au, signals, anti },
     chain: [
-      ...chain.slice(-4),
+      ...chain.slice(-19),
       {
+        t: Date.now(),
         matrix: au.matrix,
         sense: au.sense,
         N: au.N_level,
         d: signals.d,
-        intent: au.intervention
+        W: signals.W,
+        intent: au.intervention,
+        anti: anti || null
       }
     ]
   };
-}
 
-/** ---------- ANTI-LOOP ---------- */
-function antiLoopDecision(session) {
-  if (!session || !Array.isArray(session.chain)) return null;
-  const c = session.chain;
-
-  if (
-    c.length >= 3 &&
-    c[c.length - 1].matrix === c[c.length - 2].matrix &&
-    c[c.length - 2].matrix === c[c.length - 3].matrix
-  ) {
-    return "invert";
-  }
-
-  if (c.filter(x => x.N === "N1").length >= 2) {
-    return "silence";
-  }
-
-  return null;
+  return next;
 }
 
 /** ---------- API ---------- */
 export async function POST(req) {
   try {
-    const { input, session } = await req.json();
-    if (!input || input.trim().length < 3) {
-      return NextResponse.json({ output: null, au: null, session });
+    const body = await req.json();
+    const input = body?.input;
+    const session = body?.session || null;
+    const juramento = body?.juramento || null;
+
+    if (!input || String(input).trim().length < 3) {
+      return NextResponse.json({ output: null, au: null, session, cert: { level: "seed" } });
     }
 
     const lang = req.headers.get("accept-language")?.slice(0, 2) || "en";
 
-    const au = parseAU(input);
-    const signals = auSignals(au, session);
-    let newSession = nextSession(session, au, signals);
+    // 1) Parse base por texto
+    let au = parseAU(input);
 
-    const anti = antiLoopDecision(newSession);
+    // 2) Coherencia: juramento desplaza matriz
+    au.matrix = applyJuramento(au.matrix, juramento, au.screen);
+
+    // 3) Recalcular sense si matriz cambió
+    au.sense = au.matrix === "2143" ? "inverse" : "direct";
+
+    // 4) Anti-loop decide (basado en session previa + estado actual)
+    const anti = antiLoopDecision(session, au);
+
+    // 5) Anti-loop puede ajustar matriz (sin romper juramento)
+    const adjustedMatrix = applyAntiToMatrix(au.matrix, anti, juramento);
+    au.matrix = adjustedMatrix;
+    au.sense = au.matrix === "2143" ? "inverse" : "direct";
+
+    // 6) Signals (d, tone, W) ahora con coherencia real
+    const signals = auSignals(au, session, juramento);
+
+    // 7) Session nueva (incluye anti)
+    let newSession = nextSession(session, au, signals, anti);
+
+    // 8) ARPI cert desde session
+    const cert = arpiCert(session, newSession);
+
+    // 9) Intervención efectiva (anti puede forzar)
+    const effectiveSilence = au.intervention === "Silence" || anti === "silence";
 
     // SILENCE
-    if (au.intervention === "Silence" || anti === "silence") {
+    if (effectiveSilence) {
       newSession.silenceCount += 1;
       return NextResponse.json({
         output: "—",
         au: { ...au, signals, anti },
-        session: newSession
+        session: newSession,
+        cert
       });
     }
 
     // STRATEGIC QUESTION
     if (au.intervention === "StrategicQuestion") {
+      let q = strategicQuestion(au, lang);
+
+      // si anti=break: corta a una sola frase si hay dos
+      if (anti === "break") q = q.split("\n")[0];
+
       return NextResponse.json({
-        output: strategicQuestion(au, lang),
+        output: q,
         au: { ...au, signals, anti },
-        session: newSession
+        session: newSession,
+        cert
       });
     }
 
@@ -230,12 +418,16 @@ MODE: ${au.mode}
 SCREEN: ${au.screen}
 MATRIX: ${au.matrix}
 SENSE: ${au.sense}
+JURAMENTO: ${juramento || "none"}
+GRADIENT_D: ${signals.d.toFixed(2)}
+W: ${signals.W.toFixed(2)}
 
 RULES:
 - No advice
 - No reassurance
 - One short intervention
 - Max 80 words
+- Match user language (${lang}) unless user wrote in another language clearly
 
 USER:
 ${input}
@@ -253,21 +445,35 @@ ${input}
           { role: "system", content: "You are Wancko’s language engine." },
           { role: "user", content: prompt }
         ],
-        temperature: 0.3
+        temperature: 0.35
       })
     });
 
+    if (!res.ok) {
+      newSession.answerCount += 1;
+      return NextResponse.json({
+        output: "—",
+        au: { ...au, signals, anti },
+        session: newSession,
+        cert
+      });
+    }
+
     const data = await res.json();
     let out = data?.choices?.[0]?.message?.content?.trim() || "—";
+
+    // anti-break: acorta si se alarga
+    if (anti === "break" && out.includes(".")) out = out.split(".")[0] + ".";
 
     newSession.answerCount += 1;
 
     return NextResponse.json({
       output: out,
       au: { ...au, signals, anti },
-      session: newSession
+      session: newSession,
+      cert
     });
-  } catch {
-    return NextResponse.json({ output: "—", au: null, session: null });
+  } catch (e) {
+    return NextResponse.json({ output: "—", au: null, session: null, cert: { level: "seed" } });
   }
 }
