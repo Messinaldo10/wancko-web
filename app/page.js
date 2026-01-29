@@ -14,7 +14,7 @@ export default function Home() {
   const [mode, setMode] = useState("wancko"); // wancko | historical
   const [archetype, setArchetype] = useState("estoic");
 
-  const [cert, setCert] = useState(null); // { level: "seed"|"ok"|"unstable"|"blocked" }
+  const [cert, setCert] = useState(null); // { level }
 
   const [loading, setLoading] = useState(false);
 
@@ -41,26 +41,31 @@ export default function Home() {
 
   const bg = useMemo(() => {
     const tone = au?.signals?.tone || "amber";
-    const W = au?.signals?.W ?? 0.5;
+    const d = au?.signals?.d ?? 0.45;
 
     if (tone === "green") {
-      return `radial-gradient(circle at ${W * 100}% 40%, #0e3a22, #07160f 60%)`;
+      return `radial-gradient(circle at ${d * 100}% 40%, #0e3a22, #07160f 60%)`;
     }
     if (tone === "red") {
-      return `radial-gradient(circle at ${W * 100}% 40%, #3a0e0e, #1a0707 60%)`;
+      return `radial-gradient(circle at ${d * 100}% 40%, #3a0e0e, #1a0707 60%)`;
     }
-    return `radial-gradient(circle at ${W * 100}% 40%, #3a3216, #14110b 60%)`;
+    return `radial-gradient(circle at ${d * 100}% 40%, #3a3216, #14110b 60%)`;
   }, [au]);
 
-  const w = au?.signals?.W ?? 0.5;
-  const depth = au?.signals?.depth ?? null;
+  /* ---------------- GRADIENTE AU ---------------- */
+
+  const d = au?.signals?.d ?? null;
 
   const gradientLabel = useMemo(() => {
-    if (depth === null) return "—";
-    if (depth < 0.35) return "Continuidad";
-    if (depth <= 0.65) return "Crepúsculo";
+    if (d === null) return "—";
+    if (d < 0.3) return "Continuidad";
+    if (d < 0.6) return "Crepúsculo";
     return "Ruptura";
-  }, [depth]);
+  }, [d]);
+
+  const senseLabel = au?.signals?.sense === "inverse"
+    ? "lectura inversa"
+    : "lectura directa";
 
   /* ---------------- SUBMIT ---------------- */
 
@@ -73,7 +78,7 @@ export default function Home() {
     try {
       let historicalText = null;
 
-      // 1) H-WANCKO (primer acto)
+      // 1) H-WANCKO (acto 1)
       if (mode === "historical") {
         const hRes = await fetch("/api/h-wancko", {
           method: "POST",
@@ -84,7 +89,7 @@ export default function Home() {
         historicalText = hData.output || "";
       }
 
-      // 2) WANCKO interpreta (segundo acto)
+      // 2) WANCKO (acto 2)
       const wRes = await fetch("/api/wancko", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -109,7 +114,7 @@ export default function Home() {
     }
   }
 
-  /* ---------------- UI ---------------- */
+  /* ---------------- ARPI ---------------- */
 
   const certText = useMemo(() => {
     const lvl = cert?.level || "seed";
@@ -118,6 +123,8 @@ export default function Home() {
     if (lvl === "blocked") return "ARPI · Bloqueado";
     return "ARPI · Semilla";
   }, [cert]);
+
+  /* ---------------- UI ---------------- */
 
   return (
     <main
@@ -172,7 +179,7 @@ export default function Home() {
             </select>
           )}
 
-          {/* ARPI badge (inicio) */}
+          {/* ARPI */}
           <div
             style={{
               padding: "10px 12px",
@@ -210,7 +217,7 @@ export default function Home() {
           </select>
         )}
 
-        {/* AU STRIP + Gradiente AU explícito */}
+        {/* AU STRIP + GRADIENTE */}
         {au && (
           <div style={{ marginTop: 22, opacity: 0.9, fontSize: 13 }}>
             <div>
@@ -220,7 +227,6 @@ export default function Home() {
               <span style={{ opacity: 0.6 }}>N:</span> {au.N_level}
             </div>
 
-            {/* Indicador Gradiente AU */}
             <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
               <div style={{ opacity: 0.6 }}>Gradiente AU:</div>
               <div
@@ -231,37 +237,16 @@ export default function Home() {
                   background: "rgba(0,0,0,0.25)"
                 }}
               >
-                {gradientLabel}{depth !== null ? ` · d=${depth}` : ""}
+                {gradientLabel}{d !== null ? ` · d=${d.toFixed(2)}` : ""}
               </div>
-            </div>
-
-            {/* W BAR */}
-            <div style={{ marginTop: 12 }}>
-              <div style={{ opacity: 0.6, marginBottom: 6 }}>
-                W · Reason ↔ Truth
+              <div style={{ opacity: 0.6 }}>
+                {senseLabel}
               </div>
-              <div
-                style={{
-                  height: 10,
-                  background: "rgba(255,255,255,0.15)",
-                  borderRadius: 999,
-                  position: "relative"
-                }}
-              >
-                <div
-                  style={{
-                    position: "absolute",
-                    left: `${w * 100}%`,
-                    top: -4,
-                    width: 18,
-                    height: 18,
-                    borderRadius: "50%",
-                    background: "#fff",
-                    transform: "translateX(-50%)",
-                    transition: "left 500ms ease"
-                  }}
-                />
-              </div>
+              {au.anti && (
+                <div style={{ opacity: 0.6 }}>
+                  anti-loop: {au.anti}
+                </div>
+              )}
             </div>
           </div>
         )}
