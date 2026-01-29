@@ -11,8 +11,8 @@ export default function Home() {
   const [session, setSession] = useState(null);
   const [juramento, setJuramento] = useState(null);
 
-  // ✅ NUEVO: selector de modo + arquetipo histórico
-  const [mode, setMode] = useState("wancko"); // "wancko" | "historical"
+  // MODO
+  const [mode, setMode] = useState("wancko"); // wancko | historical
   const [archetype, setArchetype] = useState("estoic");
 
   const [loading, setLoading] = useState(false);
@@ -62,31 +62,44 @@ export default function Home() {
     setOutput(null);
 
     try {
-      // ✅ NUEVO: endpoint + payload según modo
-      const endpoint = mode === "historical" ? "/api/h-wancko" : "/api/wancko";
+      // ─────────────────────────────────────
+      // DOBLE ACTO AU
+      // ─────────────────────────────────────
 
-      const payload =
-        mode === "historical"
-          ? { input, archetype }
-          : { input, juramento, session: session || null };
+      let historicalText = null;
 
-      const res = await fetch(endpoint, {
+      // 1️⃣ SI ES H-WANCKO → PRIMER ACTO
+      if (mode === "historical") {
+        const hRes = await fetch("/api/h-wancko", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            input,
+            archetype
+          })
+        });
+
+        const hData = await hRes.json();
+        historicalText = hData.output || "";
+      }
+
+      // 2️⃣ SEGUNDO ACTO → WANCKO INTERPRETA
+      const wRes = await fetch("/api/wancko", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          input,
+          juramento,
+          historical: historicalText,
+          session: session || null
+        })
       });
 
-      const data = await res.json();
+      const wData = await wRes.json();
 
-      setOutput(data.output === null ? "—" : data.output);
-
-      // ✅ en modo histórico no hay AU strip (lo dejamos limpio)
-      if (mode === "historical") {
-        setAu(null);
-      } else {
-        setAu(data.au || null);
-        setSession(data.session || null);
-      }
+      setOutput(wData.output === null ? "—" : wData.output);
+      setAu(wData.au || null);
+      setSession(wData.session || null);
     } catch {
       setOutput("Wancko could not respond.");
     } finally {
@@ -113,7 +126,7 @@ export default function Home() {
           Natural assistant aligned with AU.
         </p>
 
-        {/* ✅ NUEVO: MODO */}
+        {/* MODO */}
         <div style={{ marginTop: 18, display: "flex", gap: 12 }}>
           <select
             value={mode}
@@ -150,7 +163,7 @@ export default function Home() {
           )}
         </div>
 
-        {/* JURAMENTO (solo Wancko) */}
+        {/* JURAMENTO */}
         {mode === "wancko" && (
           <select
             value={juramento || ""}
@@ -173,17 +186,16 @@ export default function Home() {
           </select>
         )}
 
-        {/* AU STRIP (solo Wancko) */}
-        {mode === "wancko" && (
+        {/* AU STRIP */}
+        {au && (
           <div style={{ marginTop: 22, opacity: 0.85, fontSize: 13 }}>
             <div>
-              <span style={{ opacity: 0.6 }}>Mode:</span> {au?.mode || "—"} ·{" "}
-              <span style={{ opacity: 0.6 }}>Screen:</span> {au?.screen || "—"} ·{" "}
-              <span style={{ opacity: 0.6 }}>Matrix:</span> {au?.matrix || "—"} ·{" "}
-              <span style={{ opacity: 0.6 }}>N:</span> {au?.N_level || "—"}
+              <span style={{ opacity: 0.6 }}>Mode:</span> {au.mode} ·{" "}
+              <span style={{ opacity: 0.6 }}>Screen:</span> {au.screen} ·{" "}
+              <span style={{ opacity: 0.6 }}>Matrix:</span> {au.matrix} ·{" "}
+              <span style={{ opacity: 0.6 }}>N:</span> {au.N_level}
             </div>
 
-            {/* W BAR */}
             <div style={{ marginTop: 12 }}>
               <div style={{ opacity: 0.6, marginBottom: 6 }}>
                 W · Reason ↔ Truth
@@ -257,15 +269,14 @@ export default function Home() {
             minHeight: 56,
             fontSize: 18,
             whiteSpace: "pre-wrap",
-            opacity: output === "—" ? 0.45 : 1,
-            transition: "opacity 300ms ease"
+            opacity: output === "—" ? 0.45 : 1
           }}
         >
           {output}
         </div>
 
-        {/* META (solo Wancko) */}
-        {mode === "wancko" && (
+        {/* META */}
+        {au && (
           <div style={{ marginTop: 20, opacity: 0.45, fontSize: 12 }}>
             Turns: {session?.turns ?? 0} · Answers:{" "}
             {session?.answerCount ?? 0} · Silences:{" "}
