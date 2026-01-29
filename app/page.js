@@ -11,10 +11,11 @@ export default function Home() {
   const [session, setSession] = useState(null);
   const [juramento, setJuramento] = useState(null);
 
-  const [mode, setMode] = useState("wancko");
+  const [mode, setMode] = useState("wancko"); // wancko | historical
   const [archetype, setArchetype] = useState("estoic");
 
-  const [cert, setCert] = useState(null);
+  const [cert, setCert] = useState({ level: "mid" });
+
   const [loading, setLoading] = useState(false);
 
   /* ---------------- SESSION ---------------- */
@@ -36,39 +37,33 @@ export default function Home() {
     } catch {}
   }, [session]);
 
-  /* ---------------- AU SIGNALS ---------------- */
+  /* ---------------- AU VISUAL ---------------- */
 
-  const d = au?.signals?.d ?? 0.45;
-  const tone = au?.signals?.tone || "amber";
-  const matrix = au?.matrix;
-  const N = au?.N_level;
-
-  /* ---------------- BACKGROUND (FIX REAL) ---------------- */
+  const d = au?.signals?.d ?? null;
+  const w = au?.signals?.W ?? 0.5;
 
   const bg = useMemo(() => {
-    const x = Math.round(d * 100);
+    const tone = au?.signals?.tone || "amber";
+    const dd = au?.signals?.d ?? 0.45;
 
     if (tone === "green") {
-      return `radial-gradient(circle at ${x}% 38%, #114d2e, #07160f 62%)`;
+      return `radial-gradient(circle at ${dd * 100}% 40%, #0e3a22, #07160f 60%)`;
     }
     if (tone === "red") {
-      return `radial-gradient(circle at ${x}% 38%, #4d1111, #1a0707 62%)`;
+      return `radial-gradient(circle at ${dd * 100}% 40%, #3a0e0e, #1a0707 60%)`;
     }
-    return `radial-gradient(circle at ${x}% 38%, #4a3f1c, #14110b 62%)`;
-  }, [d, tone, matrix, N]); // 🔑 CLAVE: dependencias explícitas
-
-  /* ---------------- GRADIENT LABEL ---------------- */
+    return `radial-gradient(circle at ${dd * 100}% 40%, #3a3216, #14110b 60%)`;
+  }, [au]);
 
   const gradientLabel = useMemo(() => {
-    if (d < 0.3) return "Continuidad";
-    if (d < 0.6) return "Crepúsculo";
+    if (d === null) return "—";
+    if (d < 0.35) return "Continuidad";
+    if (d < 0.65) return "Crepúsculo";
     return "Ruptura";
   }, [d]);
 
   const senseLabel =
-    au?.signals?.sense === "inverse"
-      ? "lectura inversa"
-      : "lectura directa";
+    au?.signals?.sense === "inverse" ? "lectura inversa" : "lectura directa";
 
   /* ---------------- SUBMIT ---------------- */
 
@@ -80,7 +75,9 @@ export default function Home() {
 
     try {
       let historicalText = null;
+      let historicalMeta = null;
 
+      // 1) H-WANCKO (acto 1) — SI el modo es historical
       if (mode === "historical") {
         const hRes = await fetch("/api/h-wancko", {
           method: "POST",
@@ -89,15 +86,18 @@ export default function Home() {
         });
         const hData = await hRes.json();
         historicalText = hData.output || "";
+        historicalMeta = hData.meta || null;
       }
 
+      // 2) WANCKO (acto 2) — SIEMPRE
       const wRes = await fetch("/api/wancko", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           input,
-          juramento,
+          juramento, // si lo eliges, sesga; si no, el modo emerge solo
           historical: historicalText,
+          historicalMeta,
           session: session || null
         })
       });
@@ -107,7 +107,7 @@ export default function Home() {
       setOutput(wData.output === null ? "—" : wData.output);
       setAu(wData.au || null);
       setSession(wData.session || null);
-      setCert(wData.cert || null);
+      setCert(wData.cert || { level: "mid" });
     } catch {
       setOutput("Wancko could not respond.");
     } finally {
@@ -118,11 +118,11 @@ export default function Home() {
   /* ---------------- ARPI ---------------- */
 
   const certText = useMemo(() => {
-    const lvl = cert?.level || "seed";
+    const lvl = cert?.level || "mid";
     if (lvl === "ok") return "ARPI · OK";
     if (lvl === "unstable") return "ARPI · Inestable";
     if (lvl === "blocked") return "ARPI · Bloqueado";
-    return "ARPI · Semilla";
+    return "ARPI · Intermedio";
   }, [cert]);
 
   /* ---------------- UI ---------------- */
@@ -144,15 +144,35 @@ export default function Home() {
           Natural assistant aligned with AU.
         </p>
 
-        {/* MODE + ARPI */}
+        {/* MODO */}
         <div style={{ marginTop: 18, display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <select value={mode} onChange={(e) => setMode(e.target.value)}>
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value)}
+            style={{
+              padding: 10,
+              background: "rgba(0,0,0,0.35)",
+              color: "#eaeaea",
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.15)"
+            }}
+          >
             <option value="wancko">Wancko</option>
             <option value="historical">H-Wancko</option>
           </select>
 
           {mode === "historical" && (
-            <select value={archetype} onChange={(e) => setArchetype(e.target.value)}>
+            <select
+              value={archetype}
+              onChange={(e) => setArchetype(e.target.value)}
+              style={{
+                padding: 10,
+                background: "rgba(0,0,0,0.35)",
+                color: "#eaeaea",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.15)"
+              }}
+            >
               <option value="estoic">Estoic</option>
               <option value="mystic">Mystic</option>
               <option value="warrior">Warrior</option>
@@ -160,54 +180,107 @@ export default function Home() {
             </select>
           )}
 
-          <div>{certText}</div>
+          {/* ARPI */}
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: 999,
+              border: "1px solid rgba(255,255,255,0.14)",
+              background: "rgba(0,0,0,0.25)",
+              fontSize: 13,
+              opacity: 0.9
+            }}
+          >
+            {certText}
+          </div>
         </div>
 
-        {/* JURAMENTO */}
-        {mode === "wancko" && (
-          <select
-            value={juramento || ""}
-            onChange={(e) => setJuramento(e.target.value || null)}
-            style={{ marginTop: 16 }}
-          >
-            <option value="">No juramento</option>
-            <option value="disciplina">Disciplina</option>
-            <option value="ansiedad">Ansiedad</option>
-            <option value="límites">Límites</option>
-            <option value="excesos">Excesos</option>
-            <option value="soltar">Soltar</option>
-          </select>
-        )}
+        {/* JURAMENTO (opcional; si lo dejas vacío, el modo emerge automáticamente) */}
+        <select
+          value={juramento || ""}
+          onChange={(e) => setJuramento(e.target.value || null)}
+          style={{
+            marginTop: 16,
+            padding: 10,
+            background: "rgba(0,0,0,0.35)",
+            color: "#eaeaea",
+            borderRadius: 10,
+            border: "1px solid rgba(255,255,255,0.15)"
+          }}
+        >
+          <option value="">Auto (sin juramento)</option>
+          <option value="disciplina">Disciplina</option>
+          <option value="ansiedad">Ansiedad</option>
+          <option value="límites">Límites</option>
+          <option value="excesos">Excesos</option>
+          <option value="soltar">Soltar</option>
+        </select>
 
-        {/* AU STRIP */}
+        {/* AU STRIP + GRADIENTE + W */}
         {au && (
-          <div style={{ marginTop: 22, fontSize: 13 }}>
+          <div style={{ marginTop: 22, opacity: 0.9, fontSize: 13 }}>
             <div>
-              Mode: {au.mode} · Screen: {au.screen} · Matrix: {au.matrix} · N:{" "}
-              {au.N_level}
+              <span style={{ opacity: 0.6 }}>Mode:</span> {au.mode} ·{" "}
+              <span style={{ opacity: 0.6 }}>Screen:</span> {au.screen} ·{" "}
+              <span style={{ opacity: 0.6 }}>Matrix:</span> {au.matrix} ·{" "}
+              <span style={{ opacity: 0.6 }}>N:</span> {au.N_level}
+              {au.operator ? (
+                <>
+                  {" "}· <span style={{ opacity: 0.6 }}>Op:</span> {au.operator}
+                </>
+              ) : null}
             </div>
 
-            <div style={{ marginTop: 8 }}>
-              Gradiente AU: {gradientLabel} · d={d.toFixed(2)} · {senseLabel}
-            </div>
-
-            {/* Anti-loop solo si NO es hold */}
-            {au.signals?.anti && au.signals.anti !== "hold" && (
-              <div style={{ marginTop: 4, opacity: 0.6 }}>
-                anti-loop: {au.signals.anti}
+            <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ opacity: 0.6 }}>Gradiente AU:</div>
+              <div
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(0,0,0,0.25)"
+                }}
+              >
+                {gradientLabel}{d !== null ? ` · d=${d.toFixed(2)}` : ""}
               </div>
-            )}
 
-            {/* BARRA */}
-            <div style={{ marginTop: 10 }}>
-              <div style={{ height: 10, background: "rgba(255,255,255,0.15)" }}>
+              <div style={{ opacity: 0.6 }}>{senseLabel}</div>
+
+              {typeof au?.signals?.mirror === "number" && (
+                <div style={{ opacity: 0.6 }}>
+                  espejo: {au.signals.mirror}
+                </div>
+              )}
+
+              {au?.anti && (
+                <div style={{ opacity: 0.6 }}>
+                  anti-loop: {au.anti}
+                </div>
+              )}
+            </div>
+
+            {/* W BAR */}
+            <div style={{ marginTop: 12 }}>
+              <div style={{ opacity: 0.6, marginBottom: 6 }}>W · Reason ↔ Truth</div>
+              <div
+                style={{
+                  height: 10,
+                  background: "rgba(255,255,255,0.15)",
+                  borderRadius: 999,
+                  position: "relative"
+                }}
+              >
                 <div
                   style={{
-                    width: `${d * 100}%`,
-                    height: "100%",
-                    background:
-                      d < 0.3 ? "#3ddc97" : d > 0.65 ? "#ff5f5f" : "#ffd36a",
-                    transition: "width 400ms ease"
+                    position: "absolute",
+                    left: `${w * 100}%`,
+                    top: -4,
+                    width: 18,
+                    height: 18,
+                    borderRadius: "50%",
+                    background: "#fff",
+                    transform: "translateX(-50%)",
+                    transition: "left 500ms ease"
                   }}
                 />
               </div>
@@ -221,17 +294,50 @@ export default function Home() {
           onChange={(e) => setInput(e.target.value)}
           placeholder="Expose what matters."
           rows={5}
-          style={{ width: "100%", marginTop: 28 }}
+          style={{
+            width: "100%",
+            marginTop: 28,
+            padding: 14,
+            fontSize: 16,
+            background: "rgba(0,0,0,0.35)",
+            color: "#eaeaea",
+            border: "1px solid rgba(255,255,255,0.14)",
+            borderRadius: 12
+          }}
           disabled={loading}
         />
 
-        <button onClick={submit} disabled={loading}>
+        <button
+          onClick={submit}
+          disabled={loading}
+          style={{
+            marginTop: 14,
+            padding: "10px 16px",
+            fontSize: 16,
+            borderRadius: 12,
+            border: "1px solid rgba(255,255,255,0.18)",
+            background: "rgba(255,255,255,0.08)",
+            color: "#eaeaea",
+            cursor: "pointer"
+          }}
+        >
           {loading ? "…" : "Expose"}
         </button>
 
         {/* OUTPUT */}
-        <div style={{ marginTop: 32, minHeight: 56 }}>{output}</div>
+        <div
+          style={{
+            marginTop: 32,
+            minHeight: 56,
+            fontSize: 18,
+            whiteSpace: "pre-wrap",
+            opacity: output === "—" ? 0.45 : 1
+          }}
+        >
+          {output}
+        </div>
 
+        {/* META */}
         {au && (
           <div style={{ marginTop: 20, opacity: 0.45, fontSize: 12 }}>
             Turns: {session?.turns ?? 0} · Chain: {session?.chain?.length ?? 0}
