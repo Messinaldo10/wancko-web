@@ -11,7 +11,7 @@ export default function Home() {
   const [session, setSession] = useState(null);
   const [juramento, setJuramento] = useState(null);
 
-  const [mode, setMode] = useState("wancko"); // wancko | historical
+  const [mode, setMode] = useState("wancko");
   const [archetype, setArchetype] = useState("estoic");
 
   const [cert, setCert] = useState(null);
@@ -36,20 +36,28 @@ export default function Home() {
     } catch {}
   }, [session]);
 
-  /* ---------------- AU GRADIENT ---------------- */
+  /* ---------------- AU SIGNALS ---------------- */
 
   const d = au?.signals?.d ?? 0.45;
   const tone = au?.signals?.tone || "amber";
+  const matrix = au?.matrix;
+  const N = au?.N_level;
+
+  /* ---------------- BACKGROUND (FIX REAL) ---------------- */
 
   const bg = useMemo(() => {
+    const x = Math.round(d * 100);
+
     if (tone === "green") {
-      return `radial-gradient(circle at ${d * 100}% 40%, #0e3a22, #07160f 60%)`;
+      return `radial-gradient(circle at ${x}% 38%, #114d2e, #07160f 62%)`;
     }
     if (tone === "red") {
-      return `radial-gradient(circle at ${d * 100}% 40%, #3a0e0e, #1a0707 60%)`;
+      return `radial-gradient(circle at ${x}% 38%, #4d1111, #1a0707 62%)`;
     }
-    return `radial-gradient(circle at ${d * 100}% 40%, #3a3216, #14110b 60%)`;
-  }, [d, tone]); // 🔑 CLAVE: dependencias explícitas
+    return `radial-gradient(circle at ${x}% 38%, #4a3f1c, #14110b 62%)`;
+  }, [d, tone, matrix, N]); // 🔑 CLAVE: dependencias explícitas
+
+  /* ---------------- GRADIENT LABEL ---------------- */
 
   const gradientLabel = useMemo(() => {
     if (d < 0.3) return "Continuidad";
@@ -59,7 +67,7 @@ export default function Home() {
 
   const senseLabel =
     au?.signals?.sense === "inverse"
-      ? "lectura inversa (2143)"
+      ? "lectura inversa"
       : "lectura directa";
 
   /* ---------------- SUBMIT ---------------- */
@@ -127,7 +135,7 @@ export default function Home() {
         color: "#eaeaea",
         fontFamily: "system-ui",
         padding: "72px 24px",
-        transition: "background 500ms ease"
+        transition: "background 600ms ease"
       }}
     >
       <div style={{ maxWidth: 760, margin: "0 auto" }}>
@@ -136,7 +144,7 @@ export default function Home() {
           Natural assistant aligned with AU.
         </p>
 
-        {/* MODE */}
+        {/* MODE + ARPI */}
         <div style={{ marginTop: 18, display: "flex", gap: 12, flexWrap: "wrap" }}>
           <select value={mode} onChange={(e) => setMode(e.target.value)}>
             <option value="wancko">Wancko</option>
@@ -160,6 +168,7 @@ export default function Home() {
           <select
             value={juramento || ""}
             onChange={(e) => setJuramento(e.target.value || null)}
+            style={{ marginTop: 16 }}
           >
             <option value="">No juramento</option>
             <option value="disciplina">Disciplina</option>
@@ -180,12 +189,18 @@ export default function Home() {
 
             <div style={{ marginTop: 8 }}>
               Gradiente AU: {gradientLabel} · d={d.toFixed(2)} · {senseLabel}
-              {au.signals?.anti && ` · anti-loop: ${au.signals.anti}`}
             </div>
 
-            {/* BARRA GRADIENTE */}
+            {/* Anti-loop solo si NO es hold */}
+            {au.signals?.anti && au.signals.anti !== "hold" && (
+              <div style={{ marginTop: 4, opacity: 0.6 }}>
+                anti-loop: {au.signals.anti}
+              </div>
+            )}
+
+            {/* BARRA */}
             <div style={{ marginTop: 10 }}>
-              <div style={{ height: 8, background: "rgba(255,255,255,0.15)" }}>
+              <div style={{ height: 10, background: "rgba(255,255,255,0.15)" }}>
                 <div
                   style={{
                     width: `${d * 100}%`,
@@ -204,8 +219,10 @@ export default function Home() {
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          rows={5}
           placeholder="Expose what matters."
+          rows={5}
+          style={{ width: "100%", marginTop: 28 }}
+          disabled={loading}
         />
 
         <button onClick={submit} disabled={loading}>
@@ -213,10 +230,10 @@ export default function Home() {
         </button>
 
         {/* OUTPUT */}
-        <div style={{ marginTop: 24, minHeight: 48 }}>{output}</div>
+        <div style={{ marginTop: 32, minHeight: 56 }}>{output}</div>
 
         {au && (
-          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.5 }}>
+          <div style={{ marginTop: 20, opacity: 0.45, fontSize: 12 }}>
             Turns: {session?.turns ?? 0} · Chain: {session?.chain?.length ?? 0}
           </div>
         )}
