@@ -55,6 +55,7 @@ export default function Home() {
   /* ---------------- GRADIENTE AU ---------------- */
 
   const d = au?.signals?.d ?? null;
+  const w = au?.signals?.W ?? 0.5;
 
   const gradientLabel = useMemo(() => {
     if (d === null) return "—";
@@ -63,9 +64,8 @@ export default function Home() {
     return "Ruptura";
   }, [d]);
 
-  const senseLabel = au?.signals?.sense === "inverse"
-    ? "lectura inversa"
-    : "lectura directa";
+  const senseLabel =
+    au?.signals?.sense === "inverse" ? "lectura inversa" : "lectura directa";
 
   /* ---------------- SUBMIT ---------------- */
 
@@ -217,7 +217,7 @@ export default function Home() {
           </select>
         )}
 
-        {/* AU STRIP + GRADIENTE */}
+        {/* AU STRIP + GRADIENTE + W */}
         {au && (
           <div style={{ marginTop: 22, opacity: 0.9, fontSize: 13 }}>
             <div>
@@ -227,7 +227,7 @@ export default function Home() {
               <span style={{ opacity: 0.6 }}>N:</span> {au.N_level}
             </div>
 
-            <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
+            <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <div style={{ opacity: 0.6 }}>Gradiente AU:</div>
               <div
                 style={{
@@ -239,14 +239,39 @@ export default function Home() {
               >
                 {gradientLabel}{d !== null ? ` · d=${d.toFixed(2)}` : ""}
               </div>
-              <div style={{ opacity: 0.6 }}>
-                {senseLabel}
-              </div>
-              {au.anti && (
-                <div style={{ opacity: 0.6 }}>
-                  anti-loop: {au.anti}
-                </div>
+
+              <div style={{ opacity: 0.6 }}>{senseLabel}</div>
+
+              {au.signals?.anti && (
+                <div style={{ opacity: 0.6 }}>anti-loop: {au.signals.anti}</div>
               )}
+            </div>
+
+            {/* W BAR (vuelve a estar) */}
+            <div style={{ marginTop: 12 }}>
+              <div style={{ opacity: 0.6, marginBottom: 6 }}>W · Reason ↔ Truth</div>
+              <div
+                style={{
+                  height: 10,
+                  background: "rgba(255,255,255,0.15)",
+                  borderRadius: 999,
+                  position: "relative"
+                }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    left: `${w * 100}%`,
+                    top: -4,
+                    width: 18,
+                    height: 18,
+                    borderRadius: "50%",
+                    background: "#fff",
+                    transform: "translateX(-50%)",
+                    transition: "left 500ms ease"
+                  }}
+                />
+              </div>
             </div>
           </div>
         )}
