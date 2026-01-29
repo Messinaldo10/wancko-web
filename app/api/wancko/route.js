@@ -1,54 +1,42 @@
 import { NextResponse } from "next/server";
 
-/* ================= AU PARSER ================= */
+/** ---------- AU PARSER v0.2 ---------- */
 function parseAU(input) {
   const text = input.toLowerCase();
 
   const mode = text.includes("we") || text.includes("they") ? "GM" : "GC";
-  const screen =
-    /(tired|empty|burnout|agotado|vacío|cansado)/.test(text) ? "DCN" : "RAV";
+  const screen = text.includes("tired") || text.includes("empty") ? "DCN" : "RAV";
 
   let matrix = "3412";
 
+  // estructura
   if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) {
     matrix = "1234";
-  } else if (/(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text)) {
+  }
+  // inversión
+  else if (/(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text)) {
     matrix = "2143";
-  } else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
+  }
+  // disolución
+  else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
     matrix = "4321";
   }
 
   let N_level = "N3";
-  if (/(harm|violence|force|dañar|forzar)/.test(text)) N_level = "N0";
-  else if (/(panic|obsessed|anxiety|pánico|obsesión|ansiedad)/.test(text)) N_level = "N1";
+  if (text.includes("panic") || text.includes("obsessed")) N_level = "N1";
+  if (text.includes("harm") || text.includes("force")) N_level = "N0";
 
   let intervention = "Answer";
   if (N_level === "N0" || N_level === "N1") intervention = "Silence";
   else if (text.includes("?")) intervention = "StrategicQuestion";
 
-  return { mode, screen, matrix, intervention, N_level };
+  // 🔁 OPERADOR DE SENTIDO (AU)
+  const sense = matrix === "2143" ? "inverse" : "direct";
+
+  return { mode, screen, matrix, sense, intervention, N_level };
 }
 
-/* ================= JURAMENTO ================= */
-function applyJuramento(au, juramento) {
-  if (!juramento) return au;
-  const j = String(juramento).toLowerCase();
-  const next = { ...au };
-
-  if (["disciplina", "límites"].includes(j)) {
-    if (next.matrix === "3412") next.matrix = "1234";
-  }
-  if (["ansiedad", "excesos"].includes(j)) {
-    if (next.matrix === "1234") next.matrix = "2143";
-  }
-  if (["soltar"].includes(j)) {
-    next.matrix = "4321";
-    next.screen = "DCN";
-  }
-  return next;
-}
-
-/* ================= MULTILENGUA (para SQ local) ================= */
+/** ---------- STRATEGIC QUESTIONS (MULTILENGUA) ---------- */
 const SQ = {
   en: {
     release: "What are you trying to release, exactly?",
@@ -58,7 +46,7 @@ const SQ = {
     groupAssumption: "Which assumption in the group is carrying the most tension?",
     collective: "What changes first if the collective goal becomes clearer than the individual one?",
     step: "What is the next concrete step that costs the least and proves direction?",
-    belief: "What is the one belief you’re protecting that might be the cause?",
+    belief: "What belief are you protecting that might be the cause?",
     trust: "What would you stop doing if you trusted your direction?",
     decision: "What’s the real decision you are avoiding naming?"
   },
@@ -88,14 +76,7 @@ const SQ = {
   }
 };
 
-function detectLang(req) {
-  const h = req.headers.get("accept-language") || "";
-  const l = h.slice(0, 2).toLowerCase();
-  if (l === "es" || l === "ca" || l === "en") return l;
-  return "en";
-}
-
-function strategicQuestion(au, lang = "en") {
+function strategicQuestion(au, lang) {
   const L = SQ[lang] ? lang : "en";
   const { mode, screen, matrix } = au;
 
@@ -117,200 +98,129 @@ function strategicQuestion(au, lang = "en") {
   return SQ[L].decision;
 }
 
-/* ================= GRADIENTES AU REALES ================= */
-function auSignals(au, prev) {
-  // depth: 0..1 (Continuidad → Ruptura)
-  let depth = au.screen === "DCN" ? 0.75 : 0.25;
+/** ---------- GRADIENTE AU ---------- */
+function auSignals(au) {
+  let d = 0.45; // crepúsculo base
 
-  // transición suave si vienes de DCN y vuelves a RAV
-  if (prev?.last?.screen === "DCN" && au.screen === "RAV") depth = 0.45;
+  if (au.matrix === "1234") d = 0.25;
+  if (au.matrix === "3412") d = 0.45;
+  if (au.matrix === "4321") d = 0.75;
 
-  // W por matriz (0..1)
-  let W =
-    au.matrix === "1234" ? 0.35 :
-    au.matrix === "2143" ? 0.55 :
-    au.matrix === "4321" ? 0.65 :
-    0.5;
-
-  // ajuste por N (más presión → desplaza W)
-  if (au.N_level === "N1") W = Math.min(1, W + 0.05);
-  if (au.N_level === "N0") W = Math.min(1, W + 0.10);
-
-  // tone según depth
   let tone = "amber";
-  if (depth < 0.35) tone = "green";
-  if (depth > 0.65) tone = "red";
+  if (d <= 0.3) tone = "green";
+  if (d >= 0.7) tone = "red";
 
-  return {
-    tone,
-    W: Number(W.toFixed(2)),
-    depth: Number(depth.toFixed(2))
-  };
+  return { d, tone, sense: au.sense };
 }
 
-/* ================= ARPI (META-CADENA) ================= */
-function arpiMeta(prev, au, signals) {
+/** ---------- SESSION / ARPI ---------- */
+function nextSession(prev, au, signals) {
   const base = prev && typeof prev === "object" ? prev : {};
   const chain = Array.isArray(base.chain) ? base.chain : [];
 
   return {
     v: 1,
     turns: (base.turns || 0) + 1,
-    last: au,
+    silenceCount: base.silenceCount || 0,
+    answerCount: base.answerCount || 0,
+    last: { ...au, signals },
     chain: [
-      ...chain.slice(-49),
+      ...chain.slice(-4),
       {
-        t: Date.now(),
-        m: au.mode,
-        s: au.screen,
-        x: au.matrix,
-        n: au.N_level,
-        w: signals.W,
-        d: signals.depth
+        matrix: au.matrix,
+        sense: au.sense,
+        N: au.N_level,
+        d: signals.d,
+        intent: au.intervention
       }
     ]
   };
 }
 
-/* ================= ANTI-LOOP (ARPI) ================= */
-function antiLoopAdjust(prevSession, au) {
-  const chain = prevSession?.chain;
-  if (!Array.isArray(chain) || chain.length < 3) return au;
+/** ---------- ANTI-LOOP AU v1 ---------- */
+function antiLoopDecision(session) {
+  if (!session || !Array.isArray(session.chain)) return null;
+  const c = session.chain;
 
-  const a = chain[chain.length - 1];
-  const b = chain[chain.length - 2];
-  const c = chain[chain.length - 3];
-
-  const same =
-    a?.x === b?.x && b?.x === c?.x &&
-    a?.s === b?.s && b?.s === c?.s &&
-    a?.n === b?.n && b?.n === c?.n;
-
-  if (!same) return au;
-
-  // Si estamos repitiendo lo mismo 3 veces seguidas:
-  // - forzamos alternancia: Question ↔ Answer
-  const next = { ...au };
-
-  if (next.intervention === "StrategicQuestion") next.intervention = "Answer";
-  else if (next.intervention === "Answer") next.intervention = "StrategicQuestion";
-
-  return next;
-}
-
-/* ================= HISTÓRICO → INTERPRETACIÓN AU ================= */
-function interpretHistorical(historicalText, au, lang = "en") {
-  // interpretación AU seca (sin terapia, sin empatía)
-  const L = SQ[lang] ? lang : "en";
-
-  if (au.matrix === "1234") {
-    return L === "es"
-      ? "Esa voz histórica apunta a estructura: falta norma, no emoción."
-      : L === "ca"
-      ? "Aquesta veu històrica apunta a estructura: falta norma, no emoció."
-      : "That historical voice points to structure: lack of rule, not emotion.";
+  // mismo patrón 3 veces
+  if (
+    c.length >= 3 &&
+    c[c.length - 1].matrix === c[c.length - 2].matrix &&
+    c[c.length - 2].matrix === c[c.length - 3].matrix &&
+    c[c.length - 1].sense === c[c.length - 2].sense
+  ) {
+    return "shorten";
   }
 
-  if (au.matrix === "2143") {
-    return L === "es"
-      ? "El contraste revela una suposición que aún no has invertido."
-      : L === "ca"
-      ? "El contrast revela una suposició que encara no has invertit."
-      : "The contrast reveals an assumption you have not inverted yet.";
+  // N1 dos veces
+  if (c.filter(x => x.N === "N1").length >= 2) {
+    return "silence";
   }
 
-  if (au.matrix === "4321") {
-    return L === "es"
-      ? "Señal de soltar control, no de buscar explicación."
-      : L === "ca"
-      ? "Senyal de deixar anar control, no de buscar explicació."
-      : "This signals releasing control, not seeking explanation.";
+  // d no se mueve
+  if (
+    c.length >= 3 &&
+    Math.abs(c[c.length - 1].d - c[c.length - 3].d) < 0.1
+  ) {
+    return "invert";
   }
 
-  return L === "es"
-    ? "El contraste muestra movimiento sin dirección."
-    : L === "ca"
-    ? "El contrast mostra moviment sense direcció."
-    : "The contrast highlights movement without direction.";
+  return null;
 }
 
-/* ================= ARPI “CERT STATUS” (sin datos) ================= */
-function certStatus(session) {
-  const chain = session?.chain;
-  if (!Array.isArray(chain) || chain.length < 3) return { level: "seed" };
-
-  const last5 = chain.slice(-5);
-  const hasN0 = last5.some((e) => e?.n === "N0");
-  const hasN1 = last5.some((e) => e?.n === "N1");
-
-  if (hasN0) return { level: "blocked" };
-  if (hasN1) return { level: "unstable" };
-  return { level: "ok" };
-}
-
-/* ================= API ================= */
+/** ---------- API ---------- */
 export async function POST(req) {
   try {
-    const lang = detectLang(req);
-    const { input, session, juramento, historical } = await req.json();
-
+    const { input, session } = await req.json();
     if (!input || input.trim().length < 3) {
       return NextResponse.json({ output: null, au: null, session });
     }
 
-    let au = parseAU(input);
-    au = applyJuramento(au, juramento);
+    const lang = req.headers.get("accept-language")?.slice(0, 2) || "en";
 
-    // Anti-loop: usa ARPI previo (si existe) para alternar intervención
-    au = antiLoopAdjust(session, au);
+    const au = parseAU(input);
+    const signals = auSignals(au);
+    let newSession = nextSession(session, au, signals);
 
-    const signals = auSignals(au, session);
-    const newSession = arpiMeta(session, au, signals);
-    const cert = certStatus(newSession);
+    const anti = antiLoopDecision(newSession);
 
-    // Silencio
-    if (au.intervention === "Silence") {
+    // SILENCIO
+    if (au.intervention === "Silence" || anti === "silence") {
+      newSession.silenceCount += 1;
       return NextResponse.json({
-        output: "I am listening. Continue.",
-        au: { ...au, signals },
-        session: newSession,
-        cert
+        output: "—",
+        au: { ...au, signals, anti },
+        session: newSession
       });
     }
 
-    // Interpretación histórica (doble acto)
-    if (historical) {
-      const interpreted = interpretHistorical(historical, au, lang);
-      return NextResponse.json({
-        output: interpreted,
-        au: { ...au, signals },
-        session: newSession,
-        cert
-      });
-    }
-
-    // Pregunta estratégica local (multilengua) para variar carga
+    // PREGUNTA ESTRATÉGICA
     if (au.intervention === "StrategicQuestion") {
-      const q = strategicQuestion(au, lang);
+      let q = strategicQuestion(au, lang);
+      if (anti === "shorten") q = q.split("?")[0] + "?";
       return NextResponse.json({
         output: q,
-        au: { ...au, signals },
-        session: newSession,
-        cert
+        au: { ...au, signals, anti },
+        session: newSession
       });
     }
 
-    // Respuesta OpenAI
-    const prompt =
-      "MODE: " + au.mode + "\n" +
-      "SCREEN: " + au.screen + "\n" +
-      "MATRIX: " + au.matrix + "\n\n" +
-      "RULES:\n" +
-      "- No advice\n" +
-      "- No reassurance\n" +
-      "- One closed intervention\n" +
-      "- Max 90 words\n\n" +
-      "USER:\n" + input;
+    // ANSWER (OpenAI)
+    const prompt = `
+MODE: ${au.mode}
+SCREEN: ${au.screen}
+MATRIX: ${au.matrix}
+SENSE: ${au.sense}
+
+RULES:
+- No advice
+- No reassurance
+- One short intervention
+- Max 80 words
+
+USER:
+${input}
+`;
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -328,26 +238,18 @@ export async function POST(req) {
       })
     });
 
-    if (!res.ok) {
-      return NextResponse.json({
-        output: "I am here. Say a little more.",
-        au: { ...au, signals },
-        session: newSession,
-        cert
-      });
-    }
-
     const data = await res.json();
-    const content = data?.choices?.[0]?.message?.content?.trim();
+    let out = data?.choices?.[0]?.message?.content?.trim() || "—";
+    if (anti === "shorten") out = out.split(".")[0] + ".";
+
+    newSession.answerCount += 1;
 
     return NextResponse.json({
-      output: content || "I am here.",
-      au: { ...au, signals },
-      session: newSession,
-      cert
+      output: out,
+      au: { ...au, signals, anti },
+      session: newSession
     });
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json({ output: "I am here.", au: null, session: null });
+  } catch {
+    return NextResponse.json({ output: "—", au: null, session: null });
   }
 }
