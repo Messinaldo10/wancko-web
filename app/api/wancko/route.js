@@ -99,18 +99,36 @@ function strategicQuestion(au, lang) {
 }
 
 /** ---------- GRADIENTE AU ---------- */
-function auSignals(au) {
-  let d = 0.45; // crepúsculo base
+function auSignals(au, session) {
+  // Base por matriz
+  let d =
+    au.matrix === "1234" ? 0.2 :
+    au.matrix === "3412" ? 0.45 :
+    au.matrix === "2143" ? 0.55 :
+    au.matrix === "4321" ? 0.75 :
+    0.45;
 
-  if (au.matrix === "1234") d = 0.25;
-  if (au.matrix === "3412") d = 0.45;
-  if (au.matrix === "4321") d = 0.75;
+  // Ajuste por screen
+  if (au.screen === "DCN") d += 0.1;
 
+  // Clamp
+  d = Math.max(0, Math.min(1, d));
+
+  // Color base
   let tone = "amber";
-  if (d <= 0.3) tone = "green";
-  if (d >= 0.7) tone = "red";
+  if (d < 0.3) tone = "green";
+  if (d > 0.65) tone = "red";
 
-  return { d, tone, sense: au.sense };
+  // Lectura inversa (2143)
+  const sense = au.matrix === "2143" ? "inverse" : "direct";
+
+  // Anti-loop (simple)
+  let anti = null;
+  if (session?.last?.matrix === au.matrix) {
+    anti = "hold";
+  }
+
+  return { d, tone, sense, anti };
 }
 
 /** ---------- SESSION / ARPI ---------- */
