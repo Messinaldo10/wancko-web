@@ -1,109 +1,146 @@
 import { NextResponse } from "next/server";
 
 /**
- * H-WANCKO — v0.2
- * Operador histórico (persona)
- * - No terapia, no consejo, no seguimiento.
- * - Responde como una figura humana (estoic/mystic/warrior/poet).
- * - 1–3 frases, tono consistente, cadencia humana.
- * - Match language (EN/ES/CA) cuando se pueda.
+ * H-WANCKO — AU v0.3 (humano por arquetipo)
+ * - Voz consistente por figura (estoic/mystic/warrior/poet)
+ * - Lectura complementaria "subjetividad → objetividad"
+ * - No terapia. No consejo. No seguimiento.
+ * - Respuesta corta (1–2 frases), pero con carácter.
  */
 
-const ARCHETYPES = {
-  estoic: {
-    name: "Estoic",
-    frame: "clarity through endurance, restraint, plain truth"
-  },
-  mystic: {
-    name: "Mystic",
-    frame: "symbolic insight, thresholds, paradox without confusion"
-  },
-  warrior: {
-    name: "Warrior",
-    frame: "decisive discipline, cost of hesitation, commitment"
-  },
-  poet: {
-    name: "Poet",
-    frame: "image and rhythm, naming the unsaid, precision through metaphor"
-  }
-};
-
-function detectLang(req, input) {
-  const h = req.headers.get("accept-language") || "";
-  const l = h.slice(0, 2).toLowerCase();
-  const t = String(input || "").toLowerCase();
-  if (/(¿|¡| que | por qué | tengo que | no entiendo )/.test(t)) return "es";
-  if (/( què | per què | no entenc | he de | cal )/.test(t)) return "ca";
-  if (l === "es" || l === "ca" || l === "en") return l;
+function clamp01(x) {
+  return Math.max(0, Math.min(1, x));
+}
+function normLang(h) {
+  const s = (h || "").toLowerCase();
+  if (s.startsWith("es")) return "es";
+  if (s.startsWith("ca")) return "ca";
   return "en";
 }
 
-function localFallback(archetypeKey, lang) {
-  const a = ARCHETYPES[archetypeKey] || ARCHETYPES.estoic;
+// Mapeo espejo: Wancko (objetivo→subjetivo), H (subjetivo→objetivo)
+// Inversión perceptiva: cada matriz se lee como su “complemento operativo”
+const MIRROR_MATRIX = {
+  "1234": "4321",
+  "3412": "2143",
+  "2143": "3412",
+  "4321": "1234"
+};
 
-  const F = {
-    en: {
-      estoic: "Hold still. Name the fact, not the storm.",
-      mystic: "A threshold rarely looks like a door.",
-      warrior: "Choose the cost you can pay—then pay it.",
-      poet: "What you avoid naming keeps writing you."
-    },
-    es: {
-      estoic: "Quédate quieto. Nombra el hecho, no la tormenta.",
-      mystic: "Un umbral rara vez parece una puerta.",
-      warrior: "Elige el precio que puedes pagar—y págalo.",
-      poet: "Lo que no nombras te sigue escribiendo."
-    },
-    ca: {
-      estoic: "Queda’t quiet. Anomena el fet, no la tempesta.",
-      mystic: "Un llindar gairebé mai sembla una porta.",
-      warrior: "Tria el cost que pots pagar—i paga’l.",
-      poet: "Allò que no anomenes et continua escrivint."
-    }
-  };
-
-  const key = archetypeKey in (F[lang] || {}) ? archetypeKey : "estoic";
-  return (F[lang] && F[lang][key]) || F.en.estoic;
+function inferMatrixFromText(input) {
+  const t = String(input || "").toLowerCase().trim();
+  let m = "3412";
+  if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de|hay que)/.test(t)) m = "1234";
+  else if (/\?$/.test(t) || /(qué es|que es|what is|què és|por qué|why)/.test(t)) m = "2143";
+  else if (/(soltar|dejar|basta|prou|stop|let go|release)/.test(t)) m = "4321";
+  return m;
 }
+
+function hSignals(mirrorMatrix) {
+  // H-pantalla: OK centrado al inicio, deriva por “matriz espejo”
+  let d =
+    mirrorMatrix === "1234" ? 0.22 :
+    mirrorMatrix === "3412" ? 0.46 :
+    mirrorMatrix === "2143" ? 0.62 :
+    mirrorMatrix === "4321" ? 0.80 :
+    0.50;
+
+  d = clamp01(d);
+
+  let tone = "amber";
+  if (d <= 0.28) tone = "green";
+  if (d >= 0.70) tone = "red";
+
+  // barra H: “subjetivo↔objetivo” (invertida respecto a Wancko)
+  let W =
+    mirrorMatrix === "1234" ? 0.78 :
+    mirrorMatrix === "3412" ? 0.62 :
+    mirrorMatrix === "2143" ? 0.45 :
+    mirrorMatrix === "4321" ? 0.28 :
+    0.5;
+
+  W = clamp01(W);
+
+  return { d, tone, W };
+}
+
+const ARCHETYPES = {
+  estoic: {
+    name: "estoic",
+    system:
+      "You are an Stoic elder. You speak with calm, discipline, clarity. 1–2 short sentences. No advice, no reassurance, no therapy. Sound human and grounded."
+  },
+  mystic: {
+    name: "mystic",
+    system:
+      "You are a mystic elder. You speak with symbolic precision, thresholds, fog, revelation. 1–2 short sentences. No advice, no reassurance, no therapy. Sound human and uncanny but clear."
+  },
+  warrior: {
+    name: "warrior",
+    system:
+      "You are a warrior elder. You speak with directness, cost, courage, action. 1–2 short sentences. No advice, no reassurance, no therapy. Sound human and sharp."
+  },
+  poet: {
+    name: "poet",
+    system:
+      "You are a poet elder. You speak with clean imagery and emotional accuracy. 1–2 short sentences. No advice, no reassurance, no therapy. Sound human."
+  }
+};
 
 export async function POST(req) {
   try {
     const { input, archetype } = await req.json();
-
     if (!input || String(input).trim().length < 3) {
-      return NextResponse.json({ output: null, meta: { historical: true } });
-    }
-
-    const key = ARCHETYPES[archetype] ? archetype : "estoic";
-    const lang = detectLang(req, input);
-
-    // Si no hay key de OpenAI, devolvemos fallback humano.
-    if (!process.env.OPENAI_API_KEY) {
+      const base = { matrix: "3412", mirror: "2143" };
       return NextResponse.json({
-        output: localFallback(key, lang),
-        meta: { archetype: key, historical: true, lang }
+        output: null,
+        meta: { archetype: "estoic", historical: true, ...base },
+        signals: hSignals(base.mirror)
       });
     }
 
-    const a = ARCHETYPES[key];
+    const lang = normLang(req.headers.get("accept-language"));
+    const key = ARCHETYPES[archetype] ? archetype : "estoic";
 
-    const prompt = `
-ARCHETYPE: ${a.name}
-FRAME: ${a.frame}
+    const m = inferMatrixFromText(input);
+    const mirror = MIRROR_MATRIX[m] || "2143";
+    const signals = hSignals(mirror);
+
+    // Si no hay API key, degradamos a respuestas no-fijas pero deterministas
+    if (!process.env.OPENAI_API_KEY) {
+      const local =
+        key === "warrior"
+          ? (lang === "es" ? "Nombrarlo ya es un acto: ahora mide el coste de seguir igual." : "Naming it is already an act: now measure the cost of staying the same.")
+          : key === "mystic"
+          ? (lang === "es" ? "Antes del umbral, todo parece niebla: observa qué parte de ti se resiste a ver." : "Before the threshold, everything is fog: notice what part of you resists seeing.")
+          : key === "poet"
+          ? (lang === "es" ? "Hay una frase que evita salir: ahí vive el centro de esto." : "There’s a sentence that refuses to emerge: that’s where the center lives.")
+          : (lang === "es" ? "Quédate con el hecho desnudo: sin adorno, sin huida." : "Stay with the bare fact: no ornament, no escape.");
+
+      return NextResponse.json({
+        output: local,
+        meta: { archetype: key, historical: true, matrix: m, mirror },
+        signals
+      });
+    }
+
+    const prompt =
+`LANG: ${lang}
+USER_MATRIX: ${m}
+MIRROR_MATRIX: ${mirror}
 
 RULES:
+- 1–2 short sentences.
 - No advice, no reassurance, no therapy.
-- No "tell me more" / no follow-up invitation.
-- Speak like a person from that archetype, consistent voice.
-- 1–3 sentences max, max 70 words.
-- Match language (${lang}) if possible.
+- Maintain archetype identity strongly.
+- Speak human, not like a machine.
 
 USER:
-${String(input).trim()}
+${input}
 
 TASK:
-Return a short, human response that preserves the archetype.
-`.trim();
+Reply in the archetype voice. Let the MIRROR_MATRIX shape how you interpret the user.
+`;
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -114,31 +151,26 @@ Return a short, human response that preserves the archetype.
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "You are H-Wancko, an archetypal historical voice." },
+          { role: "system", content: ARCHETYPES[key].system },
           { role: "user", content: prompt }
         ],
-        temperature: 0.8
+        temperature: 0.65
       })
     });
 
-    if (!res.ok) {
-      return NextResponse.json({
-        output: localFallback(key, lang),
-        meta: { archetype: key, historical: true, lang }
-      });
-    }
-
     const data = await res.json();
-    const out = data?.choices?.[0]?.message?.content?.trim() || localFallback(key, lang);
+    const out = data?.choices?.[0]?.message?.content?.trim() || (lang === "es" ? "Silencio." : "Silence.");
 
     return NextResponse.json({
       output: out,
-      meta: { archetype: key, historical: true, lang }
+      meta: { archetype: key, historical: true, matrix: m, mirror },
+      signals
     });
   } catch {
     return NextResponse.json({
-      output: "—",
-      meta: { historical: true }
+      output: "Silence was also an answer in my time.",
+      meta: { archetype: "estoic", historical: true, matrix: "3412", mirror: "2143" },
+      signals: { d: 0.5, tone: "amber", W: 0.5 }
     });
   }
 }
