@@ -1,24 +1,38 @@
 import { NextResponse } from "next/server";
-import { initLog, appendLog } from "../../../lib/au-log.js";
-import { evaluateMirror, arpiFromTrajectory } from "../../../lib/arpi-evaluator.js";
 
 /** =========================================================
- *  WANCKO API — AU v0.5 (trayectoria real)
- *  - Juramento modula matriz (coherencia AU)
- *  - Anti-loop rompe bucles (decisiones útiles, NO "hold" constante)
- *  - Gradiente d / tone + W visibles (cambian de verdad)
- *  - Cert ARPI por trayectoria espejo (no por estado puntual)
- *  - Registro conversacional (meta + texto) preparado para crecer a RAG AU interno
+ * WANCKO API — AU v0.6 (reintegrado, vivo)
+ * - AU manda (intervention y dinámica real)
+ * - Juramento modula matriz (coherencia)
+ * - Anti-loop controla variación (no "hold" constante)
+ * - Gradiente d + tono + W se mueven (visibles)
+ * - ARPI cert (seed/ok/unstable/blocked) sin exponer datos
+ * - Perfil espejo (mirror) arranca centrado y deriva por secuencia
+ * - Soporta "acto 1" histórico (texto opcional) sin perder AU
  * ========================================================= */
 
-/** ---------- AU PARSER v0.3.1+ ---------- */
+/** ---------- helpers ---------- */
+function clamp01(x) {
+  return Math.max(0, Math.min(1, x));
+}
+function normLang(h) {
+  const s = (h || "").toLowerCase();
+  if (s.startsWith("es")) return "es";
+  if (s.startsWith("ca")) return "ca";
+  return "en";
+}
+function now() {
+  return Date.now();
+}
+
+/** ---------- AU PARSER v0.4 ---------- */
 function parseAU(input) {
   const text = String(input || "").toLowerCase().trim();
 
   // MODE
   const mode = text.includes("we") || text.includes("they") ? "GM" : "GC";
 
-  // SCREEN
+  // SCREEN (ruptura/continuidad)
   const screen =
     /(tired|empty|burnout|agotad|vac[ií]o|cansad|sin fuerzas|no puedo más)/.test(text)
       ? "DCN"
@@ -27,36 +41,34 @@ function parseAU(input) {
   // MATRIX default
   let matrix = "3412";
 
-  // 1234 estructura / norma
-  if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) {
+  // 1234 — estructura / norma
+  if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de|hay que)/.test(text)) {
     matrix = "1234";
   }
-  // 2143 inversión / ontología / duda (incluye preguntas cortas)
+  // 2143 — inversión / ontología / duda / pregunta corta
   else if (
     /(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text) ||
     /\?$/.test(text) ||
-    /(qué es|que es|what is|què és|qué significa|que significa)/.test(text)
+    /(qué es|que es|what is|què és)/.test(text)
   ) {
     matrix = "2143";
   }
-  // 4321 disolución / soltar
+  // 4321 — disolución / ruptura / soltar
   else if (
-    /(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou|ya no quiero|no aguanto)/.test(text)
+    /(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou|renuncio)/.test(text)
   ) {
     matrix = "4321";
   }
 
-  // N LEVEL
+  // N LEVEL (riesgo)
   let N_level = "N3";
-  if (/(panic|obsessed|ansiedad|obses|pánico|rumiar|no paro)/.test(text)) N_level = "N1";
-  if (/(harm|force|violence|dañar|forzar|suicid|matar|golpear)/.test(text)) N_level = "N0";
+  if (/(panic|obsessed|ansiedad|obses|ataque de p[aá]nico)/.test(text)) N_level = "N1";
+  if (/(harm|force|violence|dañar|forzar|me voy a hacer daño|suicid)/.test(text)) N_level = "N0";
 
-  // degradación suave (pregunta repetida corta)
-  if (/\?$/.test(text) && text.length < 45 && N_level === "N3") {
-    N_level = "N2";
-  }
+  // degradación suave por patrón de duda repetitiva
+  if (/\?$/.test(text) && text.length < 42 && N_level === "N3") N_level = "N2";
 
-  // INTERVENTION
+  // INTERVENTION base
   let intervention = "Answer";
   if (N_level === "N0" || N_level === "N1") intervention = "Silence";
   else if (text.includes("?")) intervention = "StrategicQuestion";
@@ -66,7 +78,7 @@ function parseAU(input) {
   return { mode, screen, matrix, sense, intervention, N_level };
 }
 
-/** ---------- STRATEGIC QUESTIONS (multilengua) ---------- */
+/** ---------- Strategic Questions (multilengua) ---------- */
 const SQ = {
   en: {
     release: "What are you trying to release, exactly?",
@@ -128,7 +140,7 @@ function strategicQuestion(au, lang) {
   return SQ[L].decision;
 }
 
-/** ---------- Juramento como operador AU ---------- */
+/** ---------- Coherencia AU: Juramento como operador ---------- */
 function applyJuramento(matrix, juramento, screen) {
   if (!juramento) return matrix;
   const j = String(juramento).toLowerCase().trim();
@@ -137,30 +149,25 @@ function applyJuramento(matrix, juramento, screen) {
     if (matrix === "4321") return "3412";
     return "1234";
   }
-
   if (j === "ansiedad") {
     return "2143";
   }
-
   if (j === "límites" || j === "limites") {
     if (screen === "DCN") return "2143";
     if (matrix === "4321") return "3412";
     return matrix;
   }
-
   if (j === "excesos") {
     if (matrix === "3412") return "4321";
     return matrix;
   }
-
   if (j === "soltar") {
     return "4321";
   }
-
   return matrix;
 }
 
-/** ---------- Util repetición ---------- */
+/** ---------- repetición reciente ---------- */
 function recentRepeatCount(chain, matrix, window = 5) {
   if (!Array.isArray(chain) || chain.length === 0) return 0;
   const slice = chain.slice(-window);
@@ -172,81 +179,84 @@ function recentRepeatCount(chain, matrix, window = 5) {
   return n;
 }
 
-/** ---------- Anti-loop (decisiones útiles) ---------- */
-function antiLoopDecision(prevSession, currentAu) {
+/** ---------- Anti-loop decision (útil, visible) ---------- */
+function antiLoopDecision(prevSession, au) {
   const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
-  const rep = recentRepeatCount(chain, currentAu.matrix, 5);
+  const last5 = chain.slice(-5);
 
-  const last8 = chain.slice(-8);
-  const hasN0 = last8.some((x) => x?.N === "N0");
-  const n1Count = last8.filter((x) => x?.N === "N1").length;
+  const hasN0 = last5.some((x) => x?.N === "N0");
+  const n1Count = last5.filter((x) => x?.N === "N1").length;
   if (hasN0) return "silence";
   if (n1Count >= 2) return "silence";
 
-  // 3 repeticiones seguidas → romper
-  if (rep >= 3) return "break";
+  const rep = recentRepeatCount(chain, au.matrix, 5);
+  if (rep >= 3) return "break"; // rompe bucle
 
-  // duda repetida → aterrizar
-  const last = chain[chain.length - 1];
-  if (last?.matrix === "2143" && currentAu.matrix === "2143" && rep >= 2) return "ground";
+  // estancamiento de d (si lo tenemos en chain)
+  if (last5.length >= 3) {
+    const a = last5[last5.length - 1]?.d;
+    const b = last5[last5.length - 3]?.d;
+    if (typeof a === "number" && typeof b === "number" && Math.abs(a - b) < 0.06) {
+      return "invert";
+    }
+  }
 
   return null;
 }
 
-/** ---------- aplica anti-loop a matriz ---------- */
 function applyAntiToMatrix(matrix, anti, juramento) {
   if (!anti) return matrix;
 
   if (anti === "break") {
     if (matrix === "3412") return "2143";
     if (matrix === "1234") return "3412";
-    if (matrix === "2143") return juramento === "ansiedad" ? "2143" : "1234";
+    if (matrix === "2143") return juramento && String(juramento).toLowerCase().trim() === "ansiedad" ? "2143" : "1234";
     if (matrix === "4321") return "3412";
   }
 
-  if (anti === "ground") return "3412";
+  if (anti === "invert") {
+    if (matrix === "3412") return "2143";
+    if (matrix === "2143") return "3412";
+    return matrix;
+  }
 
   return matrix;
 }
 
-/** ---------- Signals AU (d/tone/W) que se mueven de verdad ---------- */
+/** ---------- Signals: d, tone, W (se mueven de verdad) ---------- */
 function auSignals(au, prevSession, juramento) {
-  // Base por matriz
-  let d =
-    au.matrix === "1234" ? 0.18 :
-    au.matrix === "3412" ? 0.45 :
-    au.matrix === "2143" ? 0.60 :
-    au.matrix === "4321" ? 0.86 :
-    0.45;
-
-  // Screen empuja hacia ruptura
-  if (au.screen === "DCN") d += 0.10;
-
-  // Juramento bias (coherencia visible)
-  const j = juramento ? String(juramento).toLowerCase().trim() : "";
-  if (j === "disciplina") d -= 0.08;
-  if (j === "ansiedad") d += 0.06;
-  if (j === "excesos") d += 0.10;
-  if (j === "soltar") d += 0.14;
-  if (j === "límites" || j === "limites") d -= 0.03;
-
-  // Repetición reciente (tensión de estancamiento)
   const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
   const rep = recentRepeatCount(chain, au.matrix, 5);
+
+  let d =
+    au.matrix === "1234" ? 0.18 :
+    au.matrix === "3412" ? 0.42 :
+    au.matrix === "2143" ? 0.60 :
+    au.matrix === "4321" ? 0.84 :
+    0.42;
+
+  if (au.screen === "DCN") d += 0.10;
+
+  const j = juramento ? String(juramento).toLowerCase().trim() : "";
+  if (j === "disciplina") d -= 0.08;
+  if (j === "límites" || j === "limites") d -= 0.03;
+  if (j === "ansiedad") d += 0.06;
+  if (j === "excesos") d += 0.08;
+  if (j === "soltar") d += 0.12;
+
+  // repetición: si repites 2143/3412 sube tensión; si repites 1234 baja; si repites 4321 sube
   if (rep >= 2 && (au.matrix === "3412" || au.matrix === "2143")) d += 0.07;
-  if (rep >= 2 && au.matrix === "1234") d -= 0.03;
+  if (rep >= 2 && au.matrix === "1234") d -= 0.04;
+  if (rep >= 2 && au.matrix === "4321") d += 0.04;
 
-  // Clamp
-  d = Math.max(0, Math.min(1, d));
+  d = clamp01(d);
 
-  // Tonos agresivos para que se vean
   let tone = "amber";
   if (d <= 0.28) tone = "green";
-  if (d >= 0.68) tone = "red";
+  if (d >= 0.70) tone = "red";
 
-  // W bar (no igual a d)
   let W =
-    au.matrix === "1234" ? 0.28 :
+    au.matrix === "1234" ? 0.26 :
     au.matrix === "3412" ? 0.50 :
     au.matrix === "2143" ? 0.66 :
     au.matrix === "4321" ? 0.82 :
@@ -255,15 +265,79 @@ function auSignals(au, prevSession, juramento) {
   if (au.screen === "DCN") W += 0.06;
   if (j === "disciplina") W -= 0.06;
   if (j === "soltar") W += 0.06;
-  if (j === "ansiedad") W += 0.03;
+  if (j === "ansiedad") W += 0.02;
 
-  W = Math.max(0, Math.min(1, W));
+  // W también reacciona a repetición
+  if (rep >= 3) W += 0.05;
+
+  W = clamp01(W);
 
   return { d, tone, sense: au.sense, W };
 }
 
-/** ---------- Session (mantiene tu estructura + añade log/mirror) ---------- */
-function nextSession(prev, au, signals, anti, nextLogState, mirror) {
+/** ---------- ARPI cert ---------- */
+function arpiCert(nextSessionObj) {
+  const turns = nextSessionObj?.turns || 0;
+  const chain = Array.isArray(nextSessionObj?.chain) ? nextSessionObj.chain : [];
+  const last5 = chain.slice(-5);
+
+  const hasN0 = last5.some((x) => x?.N === "N0");
+  const hasN1 = last5.some((x) => x?.N === "N1");
+
+  if (turns < 2) return { level: "seed" };
+  if (hasN0) return { level: "blocked" };
+  if (hasN1) return { level: "unstable" };
+  return { level: "ok" };
+}
+
+/** ---------- Mirror (perfil espejo) ---------- */
+function initMirror(prev) {
+  const m = prev && typeof prev === "object" ? prev : {};
+  const score = typeof m.score === "number" ? clamp01(m.score) : 0.5; // inicia intermedio
+  const drift = typeof m.drift === "number" ? clamp01(m.drift) : 0.5;
+  const status = typeof m.status === "string" ? m.status : "seed";
+  return { score, drift, status };
+}
+
+function updateMirror(prevMirror, au, signals, anti) {
+  const m = initMirror(prevMirror);
+
+  // idea: OK intermedio (0.5). Deriva según secuencia:
+  // - variedad (cambios útiles) → vuelve al centro
+  // - bucle/anti-break → se va a extremos (NOK)
+  // - d extremo sostenido → se va a extremos
+  // - N1/N0 → NOK fuerte
+  let score = m.score;
+
+  // N riesgo
+  if (au.N_level === "N0") score = 0.95;
+  else if (au.N_level === "N1") score = Math.min(0.85, score + 0.18);
+
+  // anti-loop empuja: si rompe bucle, indica tensión => se aleja un poco (porque hay fricción)
+  if (anti === "break") score = clamp01(score + 0.07);
+  if (anti === "invert") score = clamp01(score + 0.04);
+
+  // d extremo empuja
+  if (signals.d >= 0.82) score = clamp01(score + 0.06);
+  if (signals.d <= 0.18) score = clamp01(score + 0.04);
+
+  // si no hay tensión (d cerca de centro) atrae al medio
+  const pull = 0.06;
+  const towardCenter = 0.5 - score;
+  score = clamp01(score + towardCenter * pull);
+
+  // status visible
+  let status = "ok";
+  const dist = Math.abs(score - 0.5);
+  if (dist < 0.18) status = "ok";
+  else if (dist < 0.28) status = "unstable";
+  else status = "nok";
+
+  return { score, drift: m.drift, status };
+}
+
+/** ---------- Session ---------- */
+function nextSession(prev, au, signals, anti, juramento, mirror) {
   const base = prev && typeof prev === "object" ? prev : {};
   const chain = Array.isArray(base.chain) ? base.chain : [];
 
@@ -272,25 +346,38 @@ function nextSession(prev, au, signals, anti, nextLogState, mirror) {
     turns: (base.turns || 0) + 1,
     silenceCount: base.silenceCount || 0,
     answerCount: base.answerCount || 0,
+    juramento: juramento || base.juramento || null,
+    mirror,
     last: { ...au, signals, anti },
     chain: [
-      ...chain.slice(-19),
+      ...chain.slice(-29),
       {
-        t: Date.now(),
+        t: now(),
         matrix: au.matrix,
         sense: au.sense,
         N: au.N_level,
         d: signals.d,
         W: signals.W,
+        screen: au.screen,
+        mode: au.mode,
         intent: au.intervention,
         anti: anti || null
       }
-    ],
-    // === NUEVO: trayectoria ===
-    log: nextLogState.log,
-    mirror: mirror,
-    stableCount: nextLogState.stableCount || 0
+    ]
   };
+}
+
+/** ---------- Intervención conversacional efectiva ---------- */
+function effectiveIntervention(au, anti, prevSession) {
+  if (anti === "silence") return "Silence";
+  if (au.intervention === "Silence") return "Silence";
+
+  // disolver texto cuando estás en 4321 + DCN y repites → experiencia “se apaga”
+  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
+  const rep4321 = recentRepeatCount(chain, "4321", 5);
+  if (au.matrix === "4321" && au.screen === "DCN" && rep4321 >= 2) return "Dissolve";
+
+  return au.intervention; // Answer o StrategicQuestion
 }
 
 /** ---------- API ---------- */
@@ -303,94 +390,53 @@ export async function POST(req) {
     const historical = body?.historical || null;
 
     if (!input || String(input).trim().length < 3) {
+      // devolvemos seed estable para que el front tenga algo que pintar si quiere
+      const seedAu = { mode: "GC", screen: "RAV", matrix: "3412", sense: "direct", intervention: "Answer", N_level: "N3" };
+      const seedSignals = { d: 0.5, tone: "amber", sense: "direct", W: 0.5 };
+      const seedMirror = { score: 0.5, drift: 0.5, status: "seed" };
       return NextResponse.json({
         output: null,
-        au: null,
+        au: { ...seedAu, signals: seedSignals, anti: null },
         session,
-        cert: { level: "seed" }
+        cert: { level: "seed" },
+        mirror: seedMirror
       });
     }
 
-    // Idioma: si el cliente lo manda, lo usamos; si no, accept-language.
-    const langRaw = body?.lang || req.headers.get("accept-language") || "en";
-    const lang = String(langRaw).slice(0, 2).toLowerCase();
+    const lang = normLang(req.headers.get("accept-language"));
 
-    // 1) parse por texto
+    // 1) Parse AU base
     let au = parseAU(input);
 
-    // 2) juramento modula matriz
+    // 2) Coherencia: juramento modula matriz
     au.matrix = applyJuramento(au.matrix, juramento, au.screen);
     au.sense = au.matrix === "2143" ? "inverse" : "direct";
 
-    // 3) anti-loop decide
+    // 3) Anti-loop decide
     const anti = antiLoopDecision(session, au);
 
-    // 4) anti-loop ajusta matriz si procede
+    // 4) Anti-loop ajusta matriz si procede
     au.matrix = applyAntiToMatrix(au.matrix, anti, juramento);
     au.sense = au.matrix === "2143" ? "inverse" : "direct";
 
-    // 5) signals (d/tone/W)
+    // 5) Signals actuales (vivos)
     const signals = auSignals(au, session, juramento);
 
-    // 6) trayectoria (log + mirror)
-    const logState = initLog(session || {});
-    const mirror = evaluateMirror(logState.mirror, au, signals, anti);
+    // 6) Mirror (arranca centrado y deriva)
+    const mirror = updateMirror(session?.mirror, au, signals, anti);
 
-    let nextLog = appendLog(
-      { ...logState, mirror },
-      {
-        role: "user",
-        text: String(input),
-        matrix: au.matrix,
-        d: signals.d,
-        W: signals.W,
-        tone: signals.tone,
-        sense: au.sense,
-        N: au.N_level,
-        anti: anti || null
-      }
-    );
+    // 7) Intervención efectiva (ANTES de log)
+    const eff = effectiveIntervention(au, anti, session);
 
-    // Si hay acto histórico, lo registramos también (para espejo)
-    if (historical && String(historical).trim().length > 0) {
-      nextLog = appendLog(nextLog, {
-        role: "h-wancko",
-        text: String(historical),
-        matrix: au.matrix,
-        d: signals.d,
-        W: signals.W,
-        tone: signals.tone,
-        sense: au.sense,
-        N: au.N_level,
-        anti: anti || null
-      });
-    }
+    // 8) Session nueva (incluye mirror)
+    let newSession = nextSession(session, au, signals, anti, juramento, mirror);
 
-    // 7) session nueva
-    let newSession = nextSession(session, au, signals, anti, nextLog, mirror);
+    // 9) ARPI cert desde session
+    const cert = arpiCert(newSession);
 
-    // 8) cert por trayectoria
-    const cert = arpiFromTrajectory(newSession);
-
-    // 9) intervención efectiva
-    const effectiveSilence = au.intervention === "Silence" || anti === "silence";
-
-    // SILENCE
-    if (effectiveSilence) {
+    // 10) SILENCE / DISSOLVE (conversacional real)
+    if (eff === "Silence") {
       newSession.silenceCount += 1;
-      // Registramos también el output silencioso como evento
-      newSession.log = appendLog({ log: newSession.log, mirror: newSession.mirror }, {
-        role: "wancko",
-        text: "—",
-        matrix: au.matrix,
-        d: signals.d,
-        W: signals.W,
-        tone: signals.tone,
-        sense: au.sense,
-        N: au.N_level,
-        anti: anti || null
-      }).log;
-
       return NextResponse.json({
         output: "—",
         au: { ...au, signals, anti },
@@ -400,24 +446,22 @@ export async function POST(req) {
       });
     }
 
-    // STRATEGIC QUESTION (local)
-    if (au.intervention === "StrategicQuestion") {
+    if (eff === "Dissolve") {
+      newSession.silenceCount += 1;
+      return NextResponse.json({
+        output: "", // vacío = “no aparece”
+        au: { ...au, signals, anti },
+        session: newSession,
+        cert,
+        mirror
+      });
+    }
+
+    // 11) StrategicQuestion (LOCAL)
+    if (eff === "StrategicQuestion") {
       let q = strategicQuestion(au, lang);
-
-      if (anti === "break") q = q.split("\n")[0];
-
-      newSession.answerCount += 1;
-      newSession.log = appendLog({ log: newSession.log, mirror: newSession.mirror }, {
-        role: "wancko",
-        text: q,
-        matrix: au.matrix,
-        d: signals.d,
-        W: signals.W,
-        tone: signals.tone,
-        sense: au.sense,
-        N: au.N_level,
-        anti: anti || null
-      }).log;
+      // anti-break acorta si se repite demasiado
+      if (anti === "break") q = q.split("?")[0] + "?";
 
       return NextResponse.json({
         output: q,
@@ -428,35 +472,34 @@ export async function POST(req) {
       });
     }
 
-    // ANSWER (OpenAI) — con subjetividad visible por juramento + AU
-    const prompt = `
-MODE: ${au.mode}
+    // 12) ANSWER (OpenAI)
+    const prompt =
+`MODE: ${au.mode}
 SCREEN: ${au.screen}
 MATRIX: ${au.matrix}
 SENSE: ${au.sense}
 JURAMENTO: ${juramento || "none"}
 GRADIENT_D: ${signals.d.toFixed(2)}
 W: ${signals.W.toFixed(2)}
+MIRROR_SCORE: ${mirror.score.toFixed(2)} (0.50 is OK center)
 ANTI: ${anti || "none"}
-MIRROR: ${mirror.toFixed(2)}
 
 RULES:
-- No advice.
-- No reassurance.
-- No "follow-up invitation".
-- 1 intervention, 1-3 sentences max.
-- Max 90 words.
-- Make the difference of JURAMENTO clearly noticeable in tone/angle (still closed).
-- Match user language (${lang}) unless the user clearly wrote in another language.
+- No advice. No reassurance. No therapy.
+- One short intervention. Closed (no “tell me more”).
+- Max 85 words.
+- Match user language (${lang}) unless user wrote clearly in another language.
+- Sound human, not like a machine: concise, specific, present.
+
+ACTO 1 (H-WANCKO), if present:
+${historical ? historical : "(none)"}
 
 USER:
 ${input}
 
-${historical ? `H-WANCKO (context, do not copy verbatim): ${String(historical).slice(0, 280)}` : ""}
-
 TASK:
-Produce a single, closed intervention with a human cadence (not robotic).
-`.trim();
+Produce a single, closed intervention aligned with the AU fields above.
+`;
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -467,30 +510,17 @@ Produce a single, closed intervention with a human cadence (not robotic).
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "You are Wancko’s language engine." },
+          { role: "system", content: "You are Wancko’s language engine. Minimal, precise, human. You obey the RULES strictly." },
           { role: "user", content: prompt }
         ],
-        temperature: 0.55
+        temperature: 0.42
       })
     });
 
     if (!res.ok) {
-      const fallback = "—";
       newSession.answerCount += 1;
-      newSession.log = appendLog({ log: newSession.log, mirror: newSession.mirror }, {
-        role: "wancko",
-        text: fallback,
-        matrix: au.matrix,
-        d: signals.d,
-        W: signals.W,
-        tone: signals.tone,
-        sense: au.sense,
-        N: au.N_level,
-        anti: anti || null
-      }).log;
-
       return NextResponse.json({
-        output: fallback,
+        output: "—",
         au: { ...au, signals, anti },
         session: newSession,
         cert,
@@ -501,23 +531,10 @@ Produce a single, closed intervention with a human cadence (not robotic).
     const data = await res.json();
     let out = data?.choices?.[0]?.message?.content?.trim() || "—";
 
-    // anti-break: acorta un poco para romper bucle
+    // anti-break: acorta
     if (anti === "break" && out.includes(".")) out = out.split(".")[0] + ".";
 
     newSession.answerCount += 1;
-
-    // log output
-    newSession.log = appendLog({ log: newSession.log, mirror: newSession.mirror }, {
-      role: "wancko",
-      text: out,
-      matrix: au.matrix,
-      d: signals.d,
-      W: signals.W,
-      tone: signals.tone,
-      sense: au.sense,
-      N: au.N_level,
-      anti: anti || null
-    }).log;
 
     return NextResponse.json({
       output: out,
@@ -526,13 +543,13 @@ Produce a single, closed intervention with a human cadence (not robotic).
       cert,
       mirror
     });
-  } catch (e) {
+  } catch {
     return NextResponse.json({
       output: "—",
       au: null,
       session: null,
       cert: { level: "seed" },
-      mirror: 0
+      mirror: { score: 0.5, drift: 0.5, status: "seed" }
     });
   }
 }
