@@ -1,202 +1,212 @@
 import { NextResponse } from "next/server";
 
 /** =========================================================
- * H-WANCKO API — v0.4 (arquetipos humanos + espejo AU)
- * - Respuesta persona (OpenAI) con voz estable por arquetipo
- * - Barra/colores propios: Luz ↔ Violeta ↔ Noche
- * - Complementario espejo: OK intermedio al inicio, deriva por cadena
- * - Comparte session (facts + chain) con Wancko
+ *  H-WANCKO — AU v0.4 (arquetipos reales + espejo complementario)
+ *  - No terapia. No consejo. No seguimiento.
+ *  - Respuesta como "persona-arquetipo" (no plantilla fija)
+ *  - Gradiente propio: luz → violeta → noche
  * ========================================================= */
-
-const MAX_H_CHAIN = 18;
-
-function pickLang(req, fallback = "es") {
-  const h = req.headers.get("accept-language") || "";
-  const l = h.slice(0, 2).toLowerCase();
-  return ["es", "ca", "en"].includes(l) ? l : fallback;
-}
-
-function normalizeSession(prev) {
-  const base = prev && typeof prev === "object" ? prev : {};
-  const facts = base.facts && typeof base.facts === "object" ? base.facts : {};
-  const hChain = Array.isArray(base.h_chain) ? base.h_chain : [];
-  return {
-    ...base,
-    v: base.v || 2,
-    facts,
-    h_chain: hChain
-  };
-}
 
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
 
-function hSignalsFromChain(session, seed) {
-  // Queremos OK inicial intermedio: empezamos cerca de 0.5 y derivamos.
-  const c = Array.isArray(session.h_chain) ? session.h_chain : [];
-  let L = 0.52; // 0=noche (NOK), 0.5=violeta/crepúsculo (OK neutro), 1=día (OK)
-
-  // deriva por tendencia: si hay mucha “ruptura” (d alto) en Wancko, H tiende a oscuridad,
-  // si hay mucha “estructura” (d bajo) en Wancko, H tiende a luz.
-  // Como no siempre tendremos d, usamos semillas del propio H y señales suaves.
-  if (c.length >= 2) {
-    const last = c[c.length - 1];
-    const prev = c[c.length - 2];
-    // si repite “tensión”, oscurece un poco
-    if (last?.tone === "night" && prev?.tone === "night") L -= 0.06;
-    if (last?.tone === "day" && prev?.tone === "day") L += 0.04;
-  }
-
-  // micro-vida determinista
-  L += (seed - 0.5) * 0.08;
-
-  L = clamp01(L);
-
-  let tone = "violet";
-  if (L >= 0.68) tone = "day";
-  if (L <= 0.32) tone = "night";
-
-  // barra “claridad” = L
-  return { L, tone };
+function norm(s) {
+  return String(s || "").toLowerCase().trim();
 }
 
-const ARCHETYPES = {
-  estoic: {
-    name: "Estoic",
-    style: "calm, grounded, concise, disciplined, no drama",
-    inverse: "prefers structure over release; turns doubt into duty"
-  },
-  mystic: {
-    name: "Mystic",
-    style: "symbolic, luminous, soft but precise, threshold language",
-    inverse: "prefers inversion/meaning over structure; frames release as passage"
-  },
-  warrior: {
-    name: "Warrior",
-    style: "direct, decisive, energetic, responsibility, action",
-    inverse: "prefers commitment; cuts through doubt; channels tension into a move"
-  },
-  poet: {
-    name: "Poet",
-    style: "human, intimate, metaphor with restraint, feels like a person",
-    inverse: "prefers truth-by-image; holds ambiguity without collapsing"
+function detectLang(req) {
+  const h = req.headers.get("accept-language") || "";
+  const l = h.slice(0, 2).toLowerCase();
+  return l === "es" || l === "ca" || l === "en" ? l : "en";
+}
+
+/** ---------- AU parse simple (para espejo) ---------- */
+function parseAU(input) {
+  const text = norm(input);
+
+  let matrix = "3412";
+  if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) matrix = "1234";
+  else if (
+    /(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text) ||
+    /\?$/.test(text) ||
+    /(qué es|que es|what is|què és)/.test(text)
+  ) matrix = "2143";
+  else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) matrix = "4321";
+
+  const screen = /(tired|empty|burnout|agotad|vac[ií]o|cansad)/.test(text) ? "DCN" : "RAV";
+  const sense = matrix === "2143" ? "inverse" : "direct";
+
+  // N solo para color (no para silencio aquí)
+  let N_level = "N3";
+  if (/(panic|obsessed|ansiedad|obses)/.test(text)) N_level = "N1";
+  if (/(harm|force|violence|dañar|forzar)/.test(text)) N_level = "N0";
+
+  return { matrix, screen, sense, N_level };
+}
+
+/** ---------- espejo complementario ----------
+ * Wancko: objetividad AU → subjetividad AU
+ * H-Wancko: subjetividad AU → objetividad AU
+ * => mapeo complementario suave (no inverso duro)
+ */
+function mirrorMatrix(matrix) {
+  // Complemento (no literal):
+  // 1234 ↔ 2143 (estructura ↔ inversión)
+  // 3412 ↔ 4321 (continuidad ↔ disolución)
+  if (matrix === "1234") return "2143";
+  if (matrix === "2143") return "1234";
+  if (matrix === "3412") return "4321";
+  if (matrix === "4321") return "3412";
+  return "3412";
+}
+
+/** ---------- gradiente H ----------
+ * dH: 0 luz / 0.5 violeta / 1 noche
+ */
+function hSignals(au, archetype) {
+  // Base por matriz espejo
+  let d =
+    au.matrix === "1234" ? 0.55 :
+    au.matrix === "2143" ? 0.25 :
+    au.matrix === "3412" ? 0.70 :
+    au.matrix === "4321" ? 0.45 :
+    0.50;
+
+  // DCN empuja a noche
+  if (au.screen === "DCN") d += 0.10;
+
+  // Arquetipo sesga (subjetividad estable)
+  const a = norm(archetype);
+  if (a === "estoic") d -= 0.06;   // más luz/claridad
+  if (a === "mystic") d += 0.02;   // más violeta/umbral
+  if (a === "warrior") d += 0.06;  // más noche/decisión dura
+  if (a === "poet") d += 0.00;     // centrado en violeta
+
+  d = clamp01(d);
+
+  // Tone H: day / twilight / night
+  let tone = "twilight";
+  if (d <= 0.30) tone = "day";
+  if (d >= 0.70) tone = "night";
+
+  // Bar H (W_H): “claridad ↔ misterio”
+  let W =
+    au.matrix === "1234" ? 0.60 :
+    au.matrix === "2143" ? 0.35 :
+    au.matrix === "3412" ? 0.70 :
+    au.matrix === "4321" ? 0.50 :
+    0.55;
+
+  if (au.screen === "DCN") W += 0.06;
+  W = clamp01(W);
+
+  return { d, tone, W };
+}
+
+/** ---------- estilo por arquetipo (persona real) ---------- */
+function archetypeSystem(archetype, lang) {
+  const a = norm(archetype);
+
+  const baseRules =
+`RULES:
+- No advice. No therapy. No reassurance.
+- No “tell me more”. No follow-up invitation.
+- Speak as a person-archetype with stable identity.
+- 1 short passage, max 90 words.
+- Keep it vivid, not generic.`;
+
+  if (a === "estoic") {
+    return `You are an ancient Stoic voice. You speak with restraint, clarity, and discipline. ${baseRules} Language: ${lang}`;
   }
-};
+  if (a === "mystic") {
+    return `You are a mystical voice at the threshold. You speak in images, but precise. ${baseRules} Language: ${lang}`;
+  }
+  if (a === "warrior") {
+    return `You are a warrior voice. Direct, decisive, consequences-first. ${baseRules} Language: ${lang}`;
+  }
+  if (a === "poet") {
+    return `You are a poet voice. Lyrical but sharp; you reveal structure through metaphor. ${baseRules} Language: ${lang}`;
+  }
+  return `You are an ancient Stoic voice. ${baseRules} Language: ${lang}`;
+}
 
 export async function POST(req) {
   try {
-    const lang = pickLang(req, "es");
-    const body = await req.json();
+    const { input, archetype } = await req.json();
+    const lang = detectLang(req);
 
-    const input = body?.input ? String(body.input) : "";
-    const archetype = body?.archetype || "estoic";
-    const prevSession = body?.session || null;
-
-    let session = normalizeSession(prevSession);
-
-    if (!input || input.trim().length < 2) {
-      const seed = 0.51;
-      const signals = hSignalsFromChain(session, seed);
-      return NextResponse.json({
-        output: null,
-        signals,
-        session
-      });
+    if (!input || String(input).trim().length < 2) {
+      return NextResponse.json({ output: null, meta: null });
     }
 
-    const key = ARCHETYPES[archetype] ? archetype : "estoic";
-    const A = ARCHETYPES[key];
+    // AU espejo
+    const au0 = parseAU(input);
+    const mirrored = mirrorMatrix(au0.matrix);
+    const au = { ...au0, matrix: mirrored, sense: mirrored === "2143" ? "inverse" : "direct" };
 
-    // seed determinista por cadena + input
-    const seed = (() => {
-      let h = 2166136261;
-      const s = `${(session.h_chain?.length || 0) + 1}::${input}`;
-      for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i);
-        h = Math.imul(h, 16777619);
-      }
-      return (h >>> 0) / 4294967295;
-    })();
+    const signals = hSignals(au, archetype);
 
-    const signals = hSignalsFromChain(session, seed);
+    // OpenAI para que sea “persona”, no plantilla
+    const sys = archetypeSystem(archetype, lang);
 
-    // guardamos mínima traza (sin texto)
-    const item = {
-      t: Date.now(),
-      archetype: key,
-      tone: signals.tone,
-      L: signals.L
-    };
-    session.h_chain = [...(session.h_chain || []).slice(-(MAX_H_CHAIN - 1)), item];
-
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      const fallback =
-        lang === "ca"
-          ? "En el meu temps, la claredat no venia de parlar més, sinó de sostenir el moment."
-          : lang === "en"
-          ? "In my time, clarity didn’t come from talking more, but from holding the moment."
-          : "En mi tiempo, la claridad no venía de hablar más, sino de sostener el momento.";
-      return NextResponse.json({
-        output: fallback,
-        signals,
-        session
-      });
-    }
-
-    const prompt = `
-ARCHETYPE: ${A.name}
-VOICE: ${A.style}
-INVERSE_AU: ${A.inverse}
-
-H-SIGNALS:
-tone=${signals.tone} (day/violet/night)
-L=${signals.L.toFixed(2)} (0..1)
-
-FACTS (if any, do not invent):
-${Object.keys(session.facts || {}).length ? JSON.stringify(session.facts) : "none"}
-
-RULES:
-- Sound like a person of that archetype (not robotic)
-- No therapy framing, no advice list
-- No fake promises (memory only if declared)
-- One response, 2–5 sentences, max ~90 words
-- Match language: ${lang}
+    const prompt =
+`MATRIX: ${au.matrix}
+SCREEN: ${au.screen}
+SENSE: ${au.sense}
+H_GRADIENT_D: ${signals.d.toFixed(2)}
+H_TONE: ${signals.tone}
+H_BAR_W: ${signals.W.toFixed(2)}
 
 USER:
-${input}
+${String(input).trim()}
+
+TASK:
+Return ONE short archetypal passage that preserves the archetype identity.
 `;
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "You are H-Wancko: a historical archetype voice. Human, consistent." },
+          { role: "system", content: sys },
           { role: "user", content: prompt }
         ],
         temperature: 0.7
       })
     });
 
+    if (!res.ok) {
+      // fallback humano mínimo
+      const fallback =
+        lang === "es"
+          ? "No daré consejo. Te devuelvo forma: mira dónde tu frase quiere volverse verdad."
+          : lang === "ca"
+          ? "No donaré consell. Et retorno forma: mira on la frase vol fer-se veritat."
+          : "No advice. I return form: notice where your sentence tries to become true.";
+
+      return NextResponse.json({
+        output: fallback,
+        meta: { archetype: archetype || "estoic", historical: true, au, signals }
+      });
+    }
+
     const data = await res.json();
     const out = data?.choices?.[0]?.message?.content?.trim() || "—";
 
     return NextResponse.json({
       output: out,
-      signals,
-      session
+      meta: { archetype: archetype || "estoic", historical: true, au, signals }
     });
   } catch {
     return NextResponse.json({
       output: "—",
-      signals: { L: 0.52, tone: "violet" },
-      session: null
+      meta: null
     });
   }
 }
