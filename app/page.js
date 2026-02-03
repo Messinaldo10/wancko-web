@@ -1,245 +1,238 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-const LS_W = "wancko_session_v1";
-const LS_H = "h_wancko_session_v1";
-const LS_W_CHAT = "wancko_chat_v1";
-const LS_H_CHAT = "h_wancko_chat_v1";
+/**
+ * ✅ Sesiones separadas:
+ * - Wancko:  wancko_session_v2 + wancko_chat_v2
+ * - H-Wancko: hwancko_session_v2 + hwancko_chat_v2
+ */
+const LS_W_SESSION = "wancko_session_v2";
+const LS_W_CHAT = "wancko_chat_v2";
+const LS_H_SESSION = "hwancko_session_v2";
+const LS_H_CHAT = "hwancko_chat_v2";
 
-function safeParse(raw, fallback) {
-  try {
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
+function clamp01(x) {
+  return Math.max(0, Math.min(1, x));
+}
+
+function labelGradiente(d) {
+  if (d == null) return "—";
+  if (d < 0.3) return "Continuidad";
+  if (d < 0.6) return "Crepúsculo";
+  return "Ruptura";
+}
+
+function antiLabel(anti) {
+  if (!anti) return null;
+  if (anti === "silence") return "pausa";
+  if (anti === "break") return "romper bucle";
+  if (anti === "ground") return "aterrizar";
+  if (anti === "invert") return "invertir";
+  return anti;
+}
+
+function certText(cert) {
+  const lvl = cert?.level || "seed";
+  if (lvl === "ok") return "ARPI · OK";
+  if (lvl === "unstable") return "ARPI · Inestable";
+  if (lvl === "blocked") return "ARPI · Bloqueado";
+  return "ARPI · Semilla";
+}
+
+function wanckoBg(au) {
+  const tone = au?.signals?.tone || "amber";
+  const d = au?.signals?.d ?? 0.45;
+  const pos = `${Math.round(clamp01(d) * 100)}%`;
+
+  if (tone === "green") return `radial-gradient(circle at ${pos} 42%, #0e3a22, #07160f 62%)`;
+  if (tone === "red") return `radial-gradient(circle at ${pos} 42%, #3a0e0e, #1a0707 62%)`;
+  return `radial-gradient(circle at ${pos} 42%, #3a3216, #14110b 62%)`;
+}
+
+function hwanckoBg(au) {
+  // día → violeta → noche (d = luz)
+  const tone = au?.signals?.tone || "violet";
+  const d = au?.signals?.d ?? 0.55;
+  const pos = `${Math.round(clamp01(d) * 100)}%`;
+
+  if (tone === "day") return `radial-gradient(circle at ${pos} 42%, #e9f2ff, #7fb0ff 55%, #2b2b5f 100%)`;
+  if (tone === "night") return `radial-gradient(circle at ${pos} 42%, #110a1f, #0b0614 60%, #000000 110%)`;
+  return `radial-gradient(circle at ${pos} 42%, #6c2bd9, #2b0b5f 60%, #0a0612 110%)`;
+}
+
+function detectLangUI(text) {
+  const t = (text || "").toLowerCase();
+  if (/[àèéíïòóúüç·l]/.test(t) || /\b(qu[eè]|per què)\b/.test(t)) return "ca";
+  if (/[áéíóúñ¿¡]/.test(t) || /\b(qué|que|por qué|recuerda|olvida)\b/.test(t)) return "es";
+  return "en";
 }
 
 export default function Home() {
-  // UI mode
-  const [view, setView] = useState("wancko"); // "wancko" | "hwancko"
+  const [tab, setTab] = useState("wancko"); // "wancko" | "hwancko"
 
-  // Shared input/output (per view)
-  const [input, setInput] = useState("");
+  // Wancko
+  const [wInput, setWInput] = useState("");
+  const [wSession, setWSession] = useState(null);
+  const [wAu, setWAu] = useState(null);
+  const [wCert, setWCert] = useState(null);
+  const [wChat, setWChat] = useState([]); // [{role, text, t}]
+  const [juramento, setJuramento] = useState(null);
+
+  // H-Wancko
+  const [hInput, setHInput] = useState("");
+  const [hSession, setHSession] = useState(null);
+  const [hAu, setHAu] = useState(null);
+  const [hChat, setHChat] = useState([]);
+  const [archetype, setArchetype] = useState("estoic");
+
   const [loading, setLoading] = useState(false);
 
-  // Wancko state
-  const [wOutput, setWOutput] = useState(null);
-  const [wAu, setWAu] = useState(null);
-  const [wSession, setWSession] = useState(null);
-  const [juramento, setJuramento] = useState(null);
-  const [wCert, setWCert] = useState(null);
-  const [wChat, setWChat] = useState([]); // [{role:"user"|"assistant", text, t}]
-
-  // H-Wancko state
-  const [hOutput, setHOutput] = useState(null);
-  const [hMeta, setHMeta] = useState(null); // meta.au + meta.signals
-  const [archetype, setArchetype] = useState("estoic");
-  const [hChat, setHChat] = useState([]);
-
-  const bottomRef = useRef(null);
-
-  /* ---------------- LOAD (separado) ---------------- */
-
+  /* ---------------- LOAD ---------------- */
   useEffect(() => {
-    const ws = safeParse(localStorage.getItem(LS_W), null);
-    const hs = safeParse(localStorage.getItem(LS_H), null);
-    const wc = safeParse(localStorage.getItem(LS_W_CHAT), []);
-    const hc = safeParse(localStorage.getItem(LS_H_CHAT), []);
+    try {
+      const s1 = localStorage.getItem(LS_W_SESSION);
+      const c1 = localStorage.getItem(LS_W_CHAT);
+      if (s1) {
+        const parsed = JSON.parse(s1);
+        setWSession(parsed);
+        if (parsed?.juramento) setJuramento(parsed.juramento);
+      }
+      if (c1) setWChat(JSON.parse(c1));
 
-    setWSession(ws);
-    if (ws?.juramento) setJuramento(ws.juramento);
-
-    setWChat(wc);
-    setHChat(hc);
-
-    // (H no guarda session en servidor; solo chat local)
-    setHMeta(null);
+      const s2 = localStorage.getItem(LS_H_SESSION);
+      const c2 = localStorage.getItem(LS_H_CHAT);
+      if (s2) setHSession(JSON.parse(s2));
+      if (c2) setHChat(JSON.parse(c2));
+    } catch {}
   }, []);
 
+  /* ---------------- SAVE ---------------- */
   useEffect(() => {
     try {
-      if (wSession) localStorage.setItem(LS_W, JSON.stringify(wSession));
+      if (wSession) localStorage.setItem(LS_W_SESSION, JSON.stringify({ ...wSession, juramento }));
+      localStorage.setItem(LS_W_CHAT, JSON.stringify(wChat));
     } catch {}
-  }, [wSession]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_W_CHAT, JSON.stringify(wChat.slice(-80)));
-    } catch {}
-  }, [wChat]);
+  }, [wSession, wChat, juramento]);
 
   useEffect(() => {
     try {
-      localStorage.setItem(LS_H_CHAT, JSON.stringify(hChat.slice(-80)));
+      if (hSession) localStorage.setItem(LS_H_SESSION, JSON.stringify(hSession));
+      localStorage.setItem(LS_H_CHAT, JSON.stringify(hChat));
     } catch {}
-  }, [hChat]);
+  }, [hSession, hChat]);
 
-  useEffect(() => {
-    // auto-scroll al final cuando llega respuesta
-    try {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-    } catch {}
-  }, [wOutput, hOutput, wChat, hChat, view]);
+  /* ---------------- BACKGROUND ---------------- */
+  const bg = useMemo(() => {
+    return tab === "wancko" ? wanckoBg(wAu) : hwanckoBg(hAu);
+  }, [tab, wAu, hAu]);
 
-  /* ---------------- BACKGROUNDS ---------------- */
+  /* ---------------- INDICATORS ---------------- */
+  const w_d = wAu?.signals?.d ?? null;
+  const w_W = wAu?.signals?.W ?? 0.5;
+  const w_band = wAu?.signals?.band ?? wSession?.cycle?.band ?? 1;
+  const w_ok = wAu?.signals?.ok ?? wSession?.cycle?.ok_live ?? 0.5;
 
-  // Wancko background (AU)
-  const wBg = useMemo(() => {
-    const tone = wAu?.signals?.tone || "amber";
-    const d = wAu?.signals?.d ?? 0.45;
+  const h_d = hAu?.signals?.d ?? null;
+  const h_band = hSession?.cycle?.band ?? 1;
+  const h_ok = hAu?.signals?.ok ?? hSession?.cycle?.ok_live ?? 0.5;
 
-    if (tone === "green") {
-      return `radial-gradient(circle at ${d * 100}% 40%, #0e3a22, #07160f 60%)`;
-    }
-    if (tone === "red") {
-      return `radial-gradient(circle at ${d * 100}% 40%, #3a0e0e, #1a0707 60%)`;
-    }
-    return `radial-gradient(circle at ${d * 100}% 40%, #3a3216, #14110b 60%)`;
-  }, [wAu]);
-
-  // H-Wancko background (day → violet → night)
-  const hBg = useMemo(() => {
-    const d = hMeta?.signals?.d ?? 0.5;
-    const tone = hMeta?.signals?.tone || "twilight";
-
-    // tonos base
-    if (tone === "day") {
-      return `radial-gradient(circle at ${d * 100}% 40%, #e8f4ff, #b9d8ff 55%, #6b93ff 100%)`;
-    }
-    if (tone === "night") {
-      return `radial-gradient(circle at ${d * 100}% 40%, #1a1033, #0c081a 60%)`;
-    }
-    // twilight violeta
-    return `radial-gradient(circle at ${d * 100}% 40%, #6f3cff, #22103d 60%)`;
-  }, [hMeta]);
-
-  const bg = view === "wancko" ? wBg : hBg;
-
-  /* ---------------- LABELS ---------------- */
-
-  const wD = wAu?.signals?.d ?? null;
-  const wW = wAu?.signals?.W ?? 0.5;
-
-  const wGradientLabel = useMemo(() => {
-    if (wD === null) return "—";
-    if (wD < 0.3) return "Continuidad";
-    if (wD < 0.6) return "Crepúsculo";
-    return "Ruptura";
-  }, [wD]);
-
-  const wSenseLabel =
-    wAu?.signals?.sense === "inverse" ? "lectura inversa" : "lectura directa";
-
-  const hD = hMeta?.signals?.d ?? null;
-  const hW = hMeta?.signals?.W ?? 0.55;
-
-  const hGradientLabel = useMemo(() => {
-    if (hD === null) return "—";
-    if (hD <= 0.3) return "Día";
-    if (hD >= 0.7) return "Noche";
-    return "Crepúsculo";
-  }, [hD]);
-
-  /* ---------------- CERT (WANCKO) ---------------- */
-
-  const certText = useMemo(() => {
-    const lvl = wCert?.level || "seed";
-    if (lvl === "ok") return "ARPI · OK";
-    if (lvl === "unstable") return "ARPI · Inestable";
-    if (lvl === "blocked") return "ARPI · Bloqueado";
-    return "ARPI · Semilla";
-  }, [wCert]);
-
-  /* ---------------- SUBMIT ---------------- */
-
-  async function submit() {
-    if (!input.trim() || loading) return;
-
-    const userText = input.trim();
+  /* ---------------- SUBMIT (Wancko) ---------------- */
+  async function sendWancko() {
+    if (!wInput.trim() || loading) return;
     setLoading(true);
 
-    // Limpia input al enviar (lo que echabas de menos)
-    setInput("");
+    const now = Date.now();
+    const userText = wInput;
+    setWInput(""); // ✅ limpiar input al enviar
+
+    setWChat((prev) => [...prev, { role: "user", text: userText, t: now }]);
 
     try {
-      if (view === "wancko") {
-        // añade al chat local
-        setWChat((c) => [...c.slice(-79), { role: "user", text: userText, t: Date.now() }]);
+      const res = await fetch("/api/wancko", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input: userText,
+          juramento,
+          session: wSession || null
+        })
+      });
 
-        const res = await fetch("/api/wancko", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            input: userText,
-            juramento,
-            session: wSession || null
-          })
-        });
+      const data = await res.json();
 
-        const data = await res.json();
+      setWAu(data.au || null);
+      setWSession(data.session || null);
+      setWCert(data.cert || null);
 
-        setWOutput(data.output === null ? "—" : data.output);
-        setWAu(data.au || null);
-        setWSession(data.session || null);
-        setWCert(data.cert || null);
-
-        // persist juramento en session local
-        if (data.session && juramento) {
-          const next = { ...data.session, juramento };
-          setWSession(next);
-        }
-
-        setWChat((c) => [...c.slice(-79), { role: "assistant", text: data.output ?? "—", t: Date.now() }]);
-      } else {
-        setHChat((c) => [...c.slice(-79), { role: "user", text: userText, t: Date.now() }]);
-
-        const res = await fetch("/api/h-wancko", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            input: userText,
-            archetype
-          })
-        });
-
-        const data = await res.json();
-
-        setHOutput(data.output === null ? "—" : data.output);
-        setHMeta(data.meta || null);
-
-        setHChat((c) => [...c.slice(-79), { role: "assistant", text: data.output ?? "—", t: Date.now() }]);
-      }
+      const out = data.output === null ? "—" : data.output;
+      setWChat((prev) => [...prev, { role: "assistant", text: out, t: Date.now() }]);
     } catch {
-      if (view === "wancko") {
-        setWOutput("Wancko could not respond.");
-        setWChat((c) => [...c.slice(-79), { role: "assistant", text: "Wancko could not respond.", t: Date.now() }]);
-      } else {
-        setHOutput("—");
-        setHChat((c) => [...c.slice(-79), { role: "assistant", text: "—", t: Date.now() }]);
-      }
+      setWChat((prev) => [...prev, { role: "assistant", text: "Wancko could not respond.", t: Date.now() }]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /* ---------------- SUBMIT (H-Wancko) ---------------- */
+  async function sendHWancko() {
+    if (!hInput.trim() || loading) return;
+    setLoading(true);
+
+    const now = Date.now();
+    const userText = hInput;
+    setHInput(""); // ✅ limpiar input al enviar
+
+    setHChat((prev) => [...prev, { role: "user", text: userText, t: now }]);
+
+    try {
+      const lang = detectLangUI(userText);
+
+      const res = await fetch("/api/h-wancko", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept-Language": lang },
+        body: JSON.stringify({
+          input: userText,
+          archetype,
+          session: hSession || null
+        })
+      });
+
+      const data = await res.json();
+
+      setHAu(data.au || null);
+      setHSession(data.session || null);
+
+      const out = data.output === null ? "—" : data.output;
+      setHChat((prev) => [...prev, { role: "assistant", text: out, t: Date.now() }]);
+    } catch {
+      setHChat((prev) => [...prev, { role: "assistant", text: "H-Wancko could not respond.", t: Date.now() }]);
     } finally {
       setLoading(false);
     }
   }
 
   /* ---------------- UI helpers ---------------- */
+  const activeChat = tab === "wancko" ? wChat : hChat;
 
-  const activeChat = view === "wancko" ? wChat : hChat;
-  const title = view === "wancko" ? "Wancko" : "H-Wancko";
-  const subtitle =
-    view === "wancko"
-      ? "Natural assistant aligned with AU."
-      : "Historical operator · subjectivity → objectivity (AU mirror).";
-
-  function clearChat() {
-    if (view === "wancko") {
+  function clearActive() {
+    if (tab === "wancko") {
       setWChat([]);
-      setWOutput(null);
+      setWSession(null);
+      setWAu(null);
+      setWCert(null);
+      try {
+        localStorage.removeItem(LS_W_CHAT);
+        localStorage.removeItem(LS_W_SESSION);
+      } catch {}
     } else {
       setHChat([]);
-      setHOutput(null);
-      setHMeta(null);
+      setHSession(null);
+      setHAu(null);
+      try {
+        localStorage.removeItem(LS_H_CHAT);
+        localStorage.removeItem(LS_H_SESSION);
+      } catch {}
     }
   }
 
@@ -248,125 +241,142 @@ export default function Home() {
       style={{
         minHeight: "100vh",
         background: bg,
-        color: view === "hwancko" ? "#0b0b12" : "#eaeaea",
+        color: tab === "hwancko" ? "#0c1020" : "#eaeaea",
         fontFamily: "system-ui",
-        padding: "72px 24px",
-        transition: "background 600ms ease"
+        padding: "68px 20px",
+        transition: "background 650ms ease"
       }}
     >
       <div style={{ maxWidth: 860, margin: "0 auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
-            <h1 style={{ margin: 0 }}>{title}</h1>
-            <p style={{ opacity: 0.75, marginTop: 8 }}>{subtitle}</p>
+            <h1 style={{ margin: 0, letterSpacing: 0.2 }}>
+              {tab === "wancko" ? "Wancko" : "H-Wancko"}
+            </h1>
+            <p style={{ opacity: tab === "hwancko" ? 0.75 : 0.65, marginTop: 8 }}>
+              {tab === "wancko"
+                ? "Natural assistant aligned with AU."
+                : "Historical operator. Human voice. Mirror AU."}
+            </p>
           </div>
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <select
-              value={view}
-              onChange={(e) => setView(e.target.value)}
-              style={{
-                padding: 10,
-                background: "rgba(0,0,0,0.35)",
-                color: "#eaeaea",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.15)"
-              }}
-            >
-              <option value="wancko">Wancko</option>
-              <option value="hwancko">H-Wancko</option>
-            </select>
-
             <button
-              onClick={clearChat}
+              onClick={() => setTab("wancko")}
               style={{
                 padding: "10px 12px",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.14)",
-                background: "rgba(0,0,0,0.25)",
-                color: "#eaeaea",
-                cursor: "pointer",
-                opacity: 0.9
+                borderRadius: 999,
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: tab === "wancko" ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.22)",
+                color: tab === "hwancko" ? "#0c1020" : "#eaeaea",
+                cursor: "pointer"
               }}
             >
-              Clear chat
+              Wancko
             </button>
+            <button
+              onClick={() => setTab("hwancko")}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 999,
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: tab === "hwancko" ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.22)",
+                color: tab === "hwancko" ? "#0c1020" : "#eaeaea",
+                cursor: "pointer"
+              }}
+            >
+              H-Wancko
+            </button>
+
+            <button
+              onClick={clearActive}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 999,
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: "rgba(0,0,0,0.22)",
+                color: tab === "hwancko" ? "#0c1020" : "#eaeaea",
+                cursor: "pointer"
+              }}
+              title="Borrar conversación de este modo"
+            >
+              Reset
+            </button>
+
+            {/* ARPI badge visible solo en Wancko */}
+            {tab === "wancko" && (
+              <div
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(0,0,0,0.22)",
+                  fontSize: 13,
+                  opacity: 0.92
+                }}
+              >
+                {certText(wCert)}
+              </div>
+            )}
           </div>
         </div>
 
-        {/* CONTROLES */}
-        {view === "wancko" ? (
-          <div style={{ marginTop: 12, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <select
-              value={juramento || ""}
-              onChange={(e) => setJuramento(e.target.value || null)}
-              style={{
-                padding: 10,
-                background: "rgba(0,0,0,0.35)",
-                color: "#eaeaea",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.15)"
-              }}
-            >
-              <option value="">No juramento</option>
-              <option value="disciplina">Disciplina</option>
-              <option value="ansiedad">Ansiedad</option>
-              <option value="límites">Límites</option>
-              <option value="excesos">Excesos</option>
-              <option value="soltar">Soltar</option>
-            </select>
+        {/* Controls */}
+        <div style={{ marginTop: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          {tab === "wancko" ? (
+            <>
+              <select
+                value={juramento || ""}
+                onChange={(e) => setJuramento(e.target.value || null)}
+                style={{
+                  padding: 10,
+                  background: "rgba(0,0,0,0.35)",
+                  color: "#eaeaea",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.15)"
+                }}
+              >
+                <option value="">No juramento</option>
+                <option value="disciplina">Disciplina</option>
+                <option value="ansiedad">Ansiedad</option>
+                <option value="límites">Límites</option>
+                <option value="excesos">Excesos</option>
+                <option value="soltar">Soltar</option>
+              </select>
 
-            <div
-              style={{
-                padding: "10px 12px",
-                borderRadius: 999,
-                border: "1px solid rgba(255,255,255,0.14)",
-                background: "rgba(0,0,0,0.25)",
-                fontSize: 13,
-                opacity: 0.9
-              }}
-            >
-              {certText}
-            </div>
-          </div>
-        ) : (
-          <div style={{ marginTop: 12, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <select
-              value={archetype}
-              onChange={(e) => setArchetype(e.target.value)}
-              style={{
-                padding: 10,
-                background: "rgba(0,0,0,0.35)",
-                color: "#eaeaea",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.15)"
-              }}
-            >
-              <option value="estoic">Estoic</option>
-              <option value="mystic">Mystic</option>
-              <option value="warrior">Warrior</option>
-              <option value="poet">Poet</option>
-            </select>
+              <div style={{ opacity: 0.7, fontSize: 13 }}>
+                Band: <b>{w_band}</b> · OK: <b>{w_ok.toFixed(2)}</b>
+              </div>
+            </>
+          ) : (
+            <>
+              <select
+                value={archetype}
+                onChange={(e) => setArchetype(e.target.value)}
+                style={{
+                  padding: 10,
+                  background: "rgba(255,255,255,0.22)",
+                  color: "#0c1020",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.35)"
+                }}
+              >
+                <option value="estoic">Estoic</option>
+                <option value="mystic">Mystic</option>
+                <option value="warrior">Warrior</option>
+                <option value="poet">Poet</option>
+              </select>
 
-            <div
-              style={{
-                padding: "10px 12px",
-                borderRadius: 999,
-                border: "1px solid rgba(255,255,255,0.14)",
-                background: "rgba(0,0,0,0.25)",
-                fontSize: 13,
-                opacity: 0.9,
-                color: "#eaeaea"
-              }}
-            >
-              Gradiente H: {hGradientLabel}{hD !== null ? ` · d=${hD.toFixed(2)}` : ""}
-            </div>
-          </div>
-        )}
+              <div style={{ opacity: 0.85, fontSize: 13, color: "#0c1020" }}>
+                Band: <b>{h_band}</b> · OK: <b>{h_ok.toFixed(2)}</b>
+              </div>
+            </>
+          )}
+        </div>
 
-        {/* INDICADORES */}
-        {view === "wancko" && wAu && (
-          <div style={{ marginTop: 18, opacity: 0.92, fontSize: 13 }}>
+        {/* AU strip (si hay au) */}
+        {tab === "wancko" && wAu && (
+          <div style={{ marginTop: 16, opacity: 0.92, fontSize: 13 }}>
             <div>
               <span style={{ opacity: 0.6 }}>Mode:</span> {wAu.mode} ·{" "}
               <span style={{ opacity: 0.6 }}>Screen:</span> {wAu.screen} ·{" "}
@@ -374,7 +384,7 @@ export default function Home() {
               <span style={{ opacity: 0.6 }}>N:</span> {wAu.N_level}
             </div>
 
-            <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <div style={{ opacity: 0.6 }}>Gradiente AU:</div>
               <div
                 style={{
@@ -384,16 +394,22 @@ export default function Home() {
                   background: "rgba(0,0,0,0.25)"
                 }}
               >
-                {wGradientLabel}{wD !== null ? ` · d=${wD.toFixed(2)}` : ""}
+                {labelGradiente(w_d)}{w_d != null ? ` · d=${w_d.toFixed(2)}` : ""}
               </div>
 
-              <div style={{ opacity: 0.6 }}>{wSenseLabel}</div>
+              <div style={{ opacity: 0.6 }}>
+                {wAu.signals?.sense === "inverse" ? "lectura inversa" : "lectura directa"}
+              </div>
 
-              {wAu.anti && <div style={{ opacity: 0.6 }}>anti-loop: {wAu.anti}</div>}
+              {wAu.signals?.anti && (
+                <div style={{ opacity: 0.6 }}>
+                  anti-loop: {antiLabel(wAu.signals.anti)}
+                </div>
+              )}
             </div>
 
             {/* W BAR */}
-            <div style={{ marginTop: 12 }}>
+            <div style={{ marginTop: 10 }}>
               <div style={{ opacity: 0.6, marginBottom: 6 }}>W · Reason ↔ Truth</div>
               <div
                 style={{
@@ -406,7 +422,7 @@ export default function Home() {
                 <div
                   style={{
                     position: "absolute",
-                    left: `${wW * 100}%`,
+                    left: `${clamp01(w_W) * 100}%`,
                     top: -4,
                     width: 18,
                     height: 18,
@@ -421,148 +437,131 @@ export default function Home() {
           </div>
         )}
 
-        {view === "hwancko" && hMeta && (
-          <div style={{ marginTop: 18, opacity: 0.92, fontSize: 13, color: "#eaeaea" }}>
+        {tab === "hwancko" && hAu && (
+          <div style={{ marginTop: 16, opacity: 0.9, fontSize: 13, color: "#0c1020" }}>
             <div>
-              <span style={{ opacity: 0.7 }}>Archetype:</span> {hMeta.archetype} ·{" "}
-              <span style={{ opacity: 0.7 }}>Matrix:</span> {hMeta.au?.matrix} ·{" "}
-              <span style={{ opacity: 0.7 }}>Screen:</span> {hMeta.au?.screen}
+              <span style={{ opacity: 0.7 }}>Screen:</span> {hAu.screen} ·{" "}
+              <span style={{ opacity: 0.7 }}>Matrix:</span> {hAu.matrix} ·{" "}
+              <span style={{ opacity: 0.7 }}>N:</span> {hAu.N_level}
             </div>
 
-            {/* H BAR */}
-            <div style={{ marginTop: 12 }}>
-              <div style={{ opacity: 0.75, marginBottom: 6 }}>Wᴴ · Clarity ↔ Mystery</div>
+            <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ opacity: 0.7 }}>Luz:</div>
               <div
                 style={{
-                  height: 10,
-                  background: "rgba(255,255,255,0.22)",
+                  padding: "6px 10px",
                   borderRadius: 999,
-                  position: "relative"
+                  border: "1px solid rgba(255,255,255,0.35)",
+                  background: "rgba(255,255,255,0.22)"
                 }}
               >
-                <div
-                  style={{
-                    position: "absolute",
-                    left: `${hW * 100}%`,
-                    top: -4,
-                    width: 18,
-                    height: 18,
-                    borderRadius: "50%",
-                    background: "#fff",
-                    transform: "translateX(-50%)",
-                    transition: "left 500ms ease"
-                  }}
-                />
+                {h_d != null ? `d=${h_d.toFixed(2)}` : "—"}
+              </div>
+              <div style={{ opacity: 0.75 }}>
+                {hAu.signals?.tone === "day" ? "día" : hAu.signals?.tone === "night" ? "noche" : "crepúsculo"}
               </div>
             </div>
           </div>
         )}
 
-        {/* CHAT */}
+        {/* Chat */}
         <div
           style={{
-            marginTop: 22,
+            marginTop: 18,
             padding: 14,
-            borderRadius: 14,
-            border: "1px solid rgba(255,255,255,0.12)",
-            background: "rgba(0,0,0,0.22)"
+            borderRadius: 16,
+            border: tab === "hwancko" ? "1px solid rgba(255,255,255,0.35)" : "1px solid rgba(255,255,255,0.12)",
+            background: tab === "hwancko" ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.25)"
           }}
         >
-          <div style={{ fontSize: 13, opacity: 0.8, marginBottom: 10 }}>
-            Conversación ({activeChat.length})
-          </div>
-
-          <div style={{ maxHeight: 300, overflow: "auto", paddingRight: 6 }}>
-            {activeChat.length === 0 ? (
-              <div style={{ opacity: 0.6, fontSize: 13 }}>
-                Empieza con: <span style={{ opacity: 0.95 }}>“Recuerda: el animal es …”</span> o pregunta algo.
-              </div>
-            ) : (
-              activeChat.map((m, idx) => (
+          {activeChat.length === 0 ? (
+            <div style={{ opacity: tab === "hwancko" ? 0.8 : 0.6 }}>
+              {tab === "wancko"
+                ? 'Tip: "Recuerda: animal = la cabra"'
+                : "Tip: pregunta lo mismo varias veces y mira cómo cambia la luz."}
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {activeChat.map((m, idx) => (
                 <div
                   key={idx}
                   style={{
-                    marginBottom: 10,
-                    display: "flex",
-                    justifyContent: m.role === "user" ? "flex-end" : "flex-start"
+                    alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                    maxWidth: "86%",
+                    padding: "10px 12px",
+                    borderRadius: 14,
+                    border:
+                      tab === "hwancko"
+                        ? "1px solid rgba(255,255,255,0.35)"
+                        : "1px solid rgba(255,255,255,0.14)",
+                    background:
+                      m.role === "user"
+                        ? tab === "hwancko"
+                          ? "rgba(255,255,255,0.35)"
+                          : "rgba(255,255,255,0.10)"
+                        : tab === "hwancko"
+                        ? "rgba(255,255,255,0.18)"
+                        : "rgba(0,0,0,0.22)",
+                    color: tab === "hwancko" ? "#0c1020" : "#eaeaea",
+                    whiteSpace: "pre-wrap"
                   }}
                 >
-                  <div
-                    style={{
-                      maxWidth: "78%",
-                      padding: "10px 12px",
-                      borderRadius: 14,
-                      background: m.role === "user" ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.25)",
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      whiteSpace: "pre-wrap",
-                      fontSize: 14,
-                      opacity: 0.98
-                    }}
-                  >
-                    {m.text}
-                  </div>
+                  {m.text}
                 </div>
-              ))
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Composer */}
+        <div style={{ marginTop: 14 }}>
+          <textarea
+            value={tab === "wancko" ? wInput : hInput}
+            onChange={(e) => (tab === "wancko" ? setWInput(e.target.value) : setHInput(e.target.value))}
+            placeholder={tab === "wancko" ? 'Escribe aquí… (ej: "Recuerda: ciudad = Barcelona")' : "Escribe aquí…"}
+            rows={4}
+            style={{
+              width: "100%",
+              padding: 14,
+              fontSize: 16,
+              background: tab === "hwancko" ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)",
+              color: tab === "hwancko" ? "#0c1020" : "#eaeaea",
+              border: tab === "hwancko" ? "1px solid rgba(255,255,255,0.45)" : "1px solid rgba(255,255,255,0.14)",
+              borderRadius: 12
+            }}
+            disabled={loading}
+          />
+
+          <button
+            onClick={tab === "wancko" ? sendWancko : sendHWancko}
+            disabled={loading}
+            style={{
+              marginTop: 12,
+              padding: "10px 16px",
+              fontSize: 16,
+              borderRadius: 12,
+              border: tab === "hwancko" ? "1px solid rgba(255,255,255,0.55)" : "1px solid rgba(255,255,255,0.18)",
+              background: tab === "hwancko" ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.08)",
+              color: tab === "hwancko" ? "#0c1020" : "#eaeaea",
+              cursor: "pointer"
+            }}
+          >
+            {loading ? "…" : "Send"}
+          </button>
+
+          {/* Meta */}
+          <div style={{ marginTop: 10, opacity: tab === "hwancko" ? 0.85 : 0.5, fontSize: 12, color: tab === "hwancko" ? "#0c1020" : "#eaeaea" }}>
+            {tab === "wancko" ? (
+              <>
+                Turns: {wSession?.turns ?? 0} · Chain: {wSession?.chain?.length ?? 0} · Silences: {wSession?.silenceCount ?? 0}
+              </>
+            ) : (
+              <>
+                Turns: {hSession?.turns ?? 0} · Chain: {hSession?.chain?.length ?? 0}
+              </>
             )}
-            <div ref={bottomRef} />
           </div>
         </div>
-
-        {/* INPUT */}
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={view === "wancko" ? "Expose what matters." : "Speak to the archetype."}
-          rows={4}
-          style={{
-            width: "100%",
-            marginTop: 18,
-            padding: 14,
-            fontSize: 16,
-            background: "rgba(0,0,0,0.35)",
-            color: "#eaeaea",
-            border: "1px solid rgba(255,255,255,0.14)",
-            borderRadius: 12
-          }}
-          disabled={loading}
-        />
-
-        <button
-          onClick={submit}
-          disabled={loading}
-          style={{
-            marginTop: 14,
-            padding: "10px 16px",
-            fontSize: 16,
-            borderRadius: 12,
-            border: "1px solid rgba(255,255,255,0.18)",
-            background: "rgba(255,255,255,0.08)",
-            color: "#eaeaea",
-            cursor: "pointer"
-          }}
-        >
-          {loading ? "…" : "Send"}
-        </button>
-
-        {/* OUTPUT (última respuesta) */}
-        <div
-          style={{
-            marginTop: 20,
-            minHeight: 38,
-            fontSize: 16,
-            whiteSpace: "pre-wrap",
-            opacity: (view === "wancko" ? wOutput : hOutput) === "—" ? 0.55 : 1
-          }}
-        >
-          {view === "wancko" ? wOutput : hOutput}
-        </div>
-
-        {/* META */}
-        {view === "wancko" && (
-          <div style={{ marginTop: 12, opacity: 0.45, fontSize: 12 }}>
-            Turns: {wSession?.turns ?? 0} · Chain: {wSession?.chain?.length ?? 0}
-          </div>
-        )}
       </div>
     </main>
   );
