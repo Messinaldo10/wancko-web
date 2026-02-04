@@ -1,92 +1,327 @@
 import { NextResponse } from "next/server";
 
 /** =========================================================
- *  WANCKO API — AU v0.6
- *  - Sesión + chat separados (en el cliente)
- *  - Memoria local por conversación (Recuerda:/Olvida:)
- *  - Ciclo 1–3–9–27 (band) + commits suaves (d_live)
- *  - Señales AU: d, tone, W, ok, phase, anti
- *  - Coherencia por juramento (todavía aceptado por UI)
+ *  WANCKO API — AU + Lengua Cero v1 (C1)
+ *  - Deriva matriz por glifos (no solo por 3 regex)
+ *  - Memoria automática (facts) + recuperación (Q/A)
+ *  - Color/gradiente acumulables por sesión (d + tone + W)
+ *  - Anti-loop real (break/ground/silence) (no "hold" constante)
+ *  - ARPI cert (seed/ok/unstable/blocked)
  * ========================================================= */
 
-/* ------------------------- utils ------------------------- */
-function clamp01(x) {
-  return Math.max(0, Math.min(1, x));
-}
-function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-function normJuramento(j) {
-  if (!j) return null;
-  const s = String(j).toLowerCase().trim();
-  if (s === "limites") return "límites";
-  return s;
-}
-function detectLangFromText(text) {
-  const t = (text || "").toLowerCase();
-  // Muy simple, suficiente para AU v0
-  if (/[àèéíïòóúüç·l]/.test(t) || /\b(qu[eè]|per què|tothom|em\s+dedico)\b/.test(t)) return "ca";
-  if (/[áéíóúñ¿¡]/.test(t) || /\b(qué|que|por qué|dime|recuerda|olvida)\b/.test(t)) return "es";
+/* -------------------- Helpers: lang -------------------- */
+function detectLang(req, input) {
+  const h = req.headers.get("accept-language") || "";
+  const head = (h.slice(0, 2) || "").toLowerCase();
+  const t = String(input || "").toLowerCase();
+
+  // Si el usuario escribe claramente en ES/CA, preferimos eso.
+  if (/[àèéíïòóúüç]/.test(t) || /\b(què|qui|perquè|prou|estic|em sento)\b/.test(t)) return "ca";
+  if (/[áéíóúñ]/.test(t) || /\b(qué|quién|porque|estoy|me siento|debo|tengo que)\b/.test(t)) return "es";
+
+  if (head === "ca" || head === "es" || head === "en") return head;
   return "en";
 }
 
-/* -------------------- AU PARSER v0.4 --------------------- */
-function parseAU(input) {
-  const text = input.toLowerCase().trim();
+/* -------------------- Lengua Cero tokens -------------------- */
+// tokens L0 (muy baratos, AU-detect)
+function detectTokens(textRaw) {
+  const text = String(textRaw || "").toLowerCase().trim();
+  const tokens = new Set();
 
-  // MODE
-  const mode = text.includes("we") || text.includes("they") ? "GM" : "GC";
+  if (/\b(quién soy|quién eres|yo soy|qui sóc|qui ets|who am i|who are you)\b/.test(text)) tokens.add("ID");
+  if (/\b(qué es|que es|define|definir|què és|what is)\b/.test(text)) tokens.add("DEF");
+  if (/\?$/.test(text) || /\b(pregunta|question)\b/.test(text)) tokens.add("ASK");
+  if (/\b(debo|tengo que|hay que|he de|cal|s'ha de|must|have to|should|need to)\b/.test(text)) tokens.add("MUST");
+  if (/\b(puedo|capaz|capacidad|recuerda|recordar|apunta|puc|recorda|can|able|remember|note)\b/.test(text)) tokens.add("CAN");
+  if (/\b(estoy|me siento|ansiedad|obses|panic|obsessed|estic|em sento|i feel|i am)\b/.test(text)) tokens.add("STATE");
+  if (/\b(es el|es la|son los|=|és el|és la|is the)\b/.test(text)) tokens.add("FACT");
+  if (/\b(antes|ahora|siempre|abans|ara|sempre|before|now|always)\b/.test(text)) tokens.add("TIME");
+  if (/\b(porque|porque|entonces|si\b|perquè|aleshores|if\b|because|then)\b/.test(text)) tokens.add("REL");
+  if (/\b(no|nunca|jamás|mai|never)\b/.test(text)) tokens.add("NEG");
+  if (/\b(soltar|basta|parar|dejar|prou|aturar|deixar|let go|stop|enough|quit|release)\b/.test(text)) tokens.add("LETGO");
+  if (/\b(dañar|forzar|violence|harm|force|pánico|panic)\b/.test(text)) tokens.add("RISK");
 
-  // SCREEN
-  const screen = /(tired|empty|burnout|agotad|vac[ií]o|cansad|esgotad|buit)/.test(text) ? "DCN" : "RAV";
-
-  // MATRIX (default continuidad)
-  let matrix = "3412";
-
-  // 1234 — estructura / norma
-  if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) {
-    matrix = "1234";
-  }
-  // 2143 — inversión / ontología / duda
-  else if (
-    /(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text) ||
-    /\?$/.test(text) ||
-    /(qué es|que es|what is|què és|qui ets|who are you|qué eres)/.test(text)
-  ) {
-    matrix = "2143";
-  }
-  // 4321 — disolución / soltar
-  else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
-    matrix = "4321";
-  }
-
-  // N LEVEL
-  let N_level = "N3";
-  if (/(panic|obsessed|ansiedad|obses|pànic|obsession)/.test(text)) N_level = "N1";
-  if (/(harm|force|violence|dañar|forzar|violència|fer mal)/.test(text)) N_level = "N0";
-
-  // degradación suave por repetición "reactiva" (preguntas cortas repetidas)
-  if (/\?$/.test(text) && text.length < 40 && N_level === "N3") N_level = "N2";
-
-  // INTERVENTION
-  let intervention = "Answer";
-  if (N_level === "N0" || N_level === "N1") intervention = "Silence";
-  else if (text.includes("?")) intervention = "StrategicQuestion";
-
-  const sense = matrix === "2143" ? "inverse" : "direct";
-
-  return { mode, screen, matrix, sense, intervention, N_level };
+  return tokens;
 }
 
-/* ---------------- Strategic Questions (multi) ---------------- */
+/* -------------------- L0 -> Glifos AU (G1) -------------------- */
+/**
+ * Glifos simples: {op, dom}
+ * op: Δ (build), ∇ (invert), ◇ (hold), ⊘ (dissolve)
+ * dom: 1..4
+ */
+function tokensToGlifos(tokens) {
+  const glifos = [];
+
+  const add = (op, dom) => glifos.push({ op, dom });
+
+  if (tokens.has("ID")) add("◇", 4);
+  if (tokens.has("DEF")) add("∇", 2);
+  if (tokens.has("ASK")) add("◇", 2);
+  if (tokens.has("MUST")) add("Δ", 3);
+  if (tokens.has("CAN")) add("◇", 3);
+  if (tokens.has("STATE")) add("◇", 4);
+  if (tokens.has("FACT")) add("Δ", 2);
+  if (tokens.has("TIME")) add("Δ", 1);
+  if (tokens.has("REL")) add("◇", 2);
+  if (tokens.has("NEG")) add("∇", 3);
+  if (tokens.has("LETGO")) {
+    add("⊘", 3);
+    add("⊘", 4);
+  }
+  if (tokens.has("RISK")) add("⊘", 4);
+
+  return glifos;
+}
+
+/* -------------------- Matrix by glifos (emergente) -------------------- */
+function scoreMatrixFromGlifos(glifos) {
+  // puntajes
+  const score = { "1234": 0, "2143": 0, "3412": 0, "4321": 0 };
+
+  for (const g of glifos) {
+    if (g.op === "Δ" && (g.dom === 3 || g.dom === 1)) score["1234"] += 2;
+    if (g.op === "∇" && g.dom === 2) score["2143"] += 2;
+    if (g.op === "◇" && (g.dom === 2 || g.dom === 3)) score["3412"] += 1.5;
+    if (g.op === "⊘" && (g.dom === 3 || g.dom === 4)) score["4321"] += 2;
+    // señales menores
+    if (g.op === "◇" && g.dom === 4) score["3412"] += 0.7;
+    if (g.op === "∇" && g.dom === 3) score["2143"] += 0.8;
+  }
+
+  return score;
+}
+
+function pickMatrix(score) {
+  let best = "3412";
+  let bestV = -Infinity;
+  for (const k of Object.keys(score)) {
+    if (score[k] > bestV) {
+      bestV = score[k];
+      best = k;
+    }
+  }
+  // si todo muy bajo -> continuidad neutra
+  if (bestV < 1) return "3412";
+  return best;
+}
+
+/* -------------------- Juramento bias (coherencia) -------------------- */
+function applyJuramentoBias(score, juramento, screen) {
+  if (!juramento) return score;
+  const j = String(juramento).toLowerCase().trim();
+
+  const bump = (k, v) => (score[k] = (score[k] || 0) + v);
+
+  if (j === "disciplina") {
+    bump("1234", 2.0);
+    bump("3412", 0.6);
+    bump("4321", -1.2);
+  } else if (j === "ansiedad") {
+    bump("2143", 2.2);
+    bump("3412", 0.4);
+    bump("1234", -0.4);
+  } else if (j === "límites" || j === "limites") {
+    bump("1234", 0.8);
+    bump("3412", 0.7);
+    // en DCN, límites tiende a tensión/2143
+    if (screen === "DCN") bump("2143", 0.9);
+    bump("4321", -0.6);
+  } else if (j === "excesos") {
+    bump("4321", 1.6);
+    bump("2143", 0.4);
+    bump("3412", -0.2);
+  } else if (j === "soltar") {
+    bump("4321", 2.5);
+    bump("2143", 0.6);
+    bump("1234", -0.8);
+  }
+
+  return score;
+}
+
+/* -------------------- SCREEN + MODE -------------------- */
+function inferMode(text) {
+  const t = String(text || "").toLowerCase();
+  return t.includes("we") || t.includes("they") || /\b(nosotros|ellos|elles|we|they)\b/.test(t) ? "GM" : "GC";
+}
+
+function inferScreen(text) {
+  const t = String(text || "").toLowerCase();
+  return /(tired|empty|burnout|agotad|vac[ií]o|cansad|sin fuerzas|sin energia|fatig)/.test(t) ? "DCN" : "RAV";
+}
+
+/* -------------------- Tensión (G2) + N_level -------------------- */
+function computeTension(tokens, glifos, prevSession) {
+  // T0..T3
+  let T = 0;
+
+  // base por tokens
+  if (tokens.has("ASK")) T += 0.5;
+  if (tokens.has("DEF")) T += 0.8;
+  if (tokens.has("NEG") && tokens.has("MUST")) T += 1.6;
+  if (tokens.has("LETGO")) T += 1.2;
+  if (tokens.has("RISK")) T = 3;
+
+  // repetición glífica sin resolución
+  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
+  const last = chain[chain.length - 1];
+  if (last?.glifoSig && glifoSignature(glifos) === last.glifoSig) T += 0.8;
+
+  // clamp a 0..3
+  T = Math.max(0, Math.min(3, T));
+  return T;
+}
+
+function computeNLevel(tokens, text, T) {
+  const t = String(text || "").toLowerCase();
+  if (/(harm|force|violence|dañar|forzar)/.test(t) || tokens.has("RISK")) return "N0";
+  if (/(panic|obsessed|ansiedad|obses)/.test(t)) return "N1";
+  if (T >= 2.2) return "N2";
+  return "N3";
+}
+
+/* -------------------- Anti-loop -------------------- */
+function recentRepeatCount(chain, matrix, window = 5) {
+  if (!Array.isArray(chain) || chain.length === 0) return 0;
+  const slice = chain.slice(-window);
+  let n = 0;
+  for (let i = slice.length - 1; i >= 0; i--) {
+    if (slice[i]?.matrix === matrix) n += 1;
+    else break;
+  }
+  return n;
+}
+
+function antiLoopDecision(prevSession, au, signals) {
+  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
+  const rep = recentRepeatCount(chain, au.matrix, 5);
+
+  const last5 = chain.slice(-5);
+  const hasN0 = last5.some((x) => x?.N === "N0");
+  const n1Count = last5.filter((x) => x?.N === "N1").length;
+
+  if (hasN0) return "silence";
+  if (n1Count >= 2) return "silence";
+
+  // si se repite 3+ -> break
+  if (rep >= 3) return "break";
+
+  // estancamiento de d
+  if (chain.length >= 3) {
+    const d0 = chain[chain.length - 3]?.d;
+    const d1 = chain[chain.length - 1]?.d;
+    if (typeof d0 === "number" && typeof d1 === "number" && Math.abs(d1 - d0) < 0.05) {
+      return "invert";
+    }
+  }
+
+  return null;
+}
+
+function applyAntiToMatrix(matrix, anti) {
+  if (!anti) return matrix;
+
+  if (anti === "break") {
+    if (matrix === "3412") return "2143";
+    if (matrix === "2143") return "1234";
+    if (matrix === "1234") return "3412";
+    if (matrix === "4321") return "3412";
+  }
+
+  if (anti === "invert") {
+    // fuerza inversión si no estamos ya ahí
+    if (matrix !== "2143") return "2143";
+  }
+
+  return matrix;
+}
+
+/* -------------------- Signals: d, tone, W -------------------- */
+function dominantGlifo(glifos) {
+  // simple: prioriza ⊘, luego ∇, luego Δ, luego ◇
+  const rank = (g) => (g.op === "⊘" ? 4 : g.op === "∇" ? 3 : g.op === "Δ" ? 2 : 1);
+  let best = null;
+  let bestR = -1;
+  for (const g of glifos) {
+    const r = rank(g);
+    if (r > bestR) {
+      bestR = r;
+      best = g;
+    }
+  }
+  return best || { op: "◇", dom: 2 };
+}
+
+function computeSignals(au, glifos, prevSession, juramento, T) {
+  // base d por matriz
+  let d =
+    au.matrix === "1234" ? 0.18 :
+    au.matrix === "3412" ? 0.42 :
+    au.matrix === "2143" ? 0.58 :
+    au.matrix === "4321" ? 0.82 :
+    0.42;
+
+  // screen DCN empuja a ruptura
+  if (au.screen === "DCN") d += 0.08;
+
+  // tensión empuja
+  d += (T * 0.06);
+
+  // juramento sesga (para que se vea)
+  const j = juramento ? String(juramento).toLowerCase().trim() : "";
+  if (j === "disciplina") d -= 0.08;
+  if (j === "ansiedad") d += 0.07;
+  if (j === "excesos") d += 0.10;
+  if (j === "soltar") d += 0.14;
+  if (j === "límites" || j === "limites") d -= 0.03;
+
+  // repetición sube tensión visual si estás pegado en 3412/2143
+  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
+  const rep = recentRepeatCount(chain, au.matrix, 5);
+  if (rep >= 2 && (au.matrix === "3412" || au.matrix === "2143")) d += 0.07;
+  if (rep >= 2 && au.matrix === "1234") d -= 0.04;
+
+  // clamp
+  d = Math.max(0, Math.min(1, d));
+
+  // tone: más agresivo (verde/ámbar/rojo se ve)
+  let tone = "amber";
+  if (d <= 0.28) tone = "green";
+  if (d >= 0.68) tone = "red";
+
+  // W: razón↔verdad (dom glifo)
+  const dg = dominantGlifo(glifos);
+  let W = 0.50;
+
+  if (dg.op === "Δ") W = 0.30;
+  if (dg.op === "◇") W = 0.48;
+  if (dg.op === "∇") W = 0.65;
+  if (dg.op === "⊘") W = 0.80;
+
+  // screen/tensión matiza W
+  if (au.screen === "DCN") W += 0.05;
+  W += (T * 0.02);
+
+  // clamp
+  W = Math.max(0, Math.min(1, W));
+
+  return { d, tone, W };
+}
+
+/* -------------------- Strategic Question (multi) -------------------- */
 const SQ = {
   en: {
+    // DCN
     release: "What are you trying to release, exactly?",
     invert: "What flips if you assume the opposite is true for one minute?",
     stop: "What is the smallest thing you can stop feeding today?",
-    rule: "What would be the simplest rule that you can actually follow?",
-    groupAssumption: "Which assumption is carrying the most tension right now?",
+    // GM
+    rule: "What would be the simplest rule that everyone could actually follow?",
+    groupAssumption: "Which assumption in the group is carrying the most tension?",
     collective: "What changes first if the collective goal becomes clearer than the individual one?",
+    // GC+RAV
     step: "What is the next concrete step that costs the least and proves direction?",
     belief: "What belief are you protecting that might be the cause?",
     trust: "What would you stop doing if you trusted your direction?",
@@ -96,9 +331,9 @@ const SQ = {
     release: "¿Qué estás intentando soltar exactamente?",
     invert: "¿Qué cambia si asumes que lo contrario es cierto durante un minuto?",
     stop: "¿Qué es lo más pequeño que podrías dejar de alimentar hoy?",
-    rule: "¿Cuál es la regla más simple que tú sí puedes cumplir de verdad?",
-    groupAssumption: "¿Qué suposición está cargando más tensión ahora mismo?",
-    collective: "¿Qué cambia primero si el objetivo colectivo es más claro que el individual?",
+    rule: "¿Cuál sería la regla más simple que todos podrían seguir de verdad?",
+    groupAssumption: "¿Qué suposición del grupo está cargando más tensión?",
+    collective: "¿Qué cambia primero si el objetivo colectivo se vuelve más claro que el individual?",
     step: "¿Cuál es el siguiente paso concreto que cuesta menos y demuestra dirección?",
     belief: "¿Qué creencia estás protegiendo que podría ser la causa?",
     trust: "¿Qué dejarías de hacer si confiaras en tu dirección?",
@@ -108,9 +343,9 @@ const SQ = {
     release: "Què estàs intentant deixar anar exactament?",
     invert: "Què canvia si assumes que el contrari és cert durant un minut?",
     stop: "Quina és la cosa més petita que podries deixar d’alimentar avui?",
-    rule: "Quina és la norma més simple que tu sí pots complir de veritat?",
-    groupAssumption: "Quina suposició carrega més tensió ara mateix?",
-    collective: "Què canvia primer si l’objectiu col·lectiu és més clar que l’individual?",
+    rule: "Quina seria la norma més simple que tothom podria seguir de veritat?",
+    groupAssumption: "Quina suposició del grup carrega més tensió?",
+    collective: "Què canvia primer si l’objectiu col·lectiu esdevé més clar que l’individual?",
     step: "Quin és el següent pas concret que costa menys i demostra direcció?",
     belief: "Quina creença estàs protegint que podria ser la causa?",
     trust: "Què deixaries de fer si confiessis en la teva direcció?",
@@ -140,346 +375,128 @@ function strategicQuestion(au, lang) {
   return SQ[L].decision;
 }
 
-/* ---------------- Coherencia AU por juramento ---------------- */
-function applyJuramento(matrix, juramento, screen) {
-  const j = normJuramento(juramento);
-  if (!j) return matrix;
+/* -------------------- Memoria automática (facts) -------------------- */
+// Hechos simples: animal/ciudad. Puedes ampliar después.
+function extractFacts(textRaw) {
+  const text = String(textRaw || "").trim();
 
-  if (j === "disciplina") {
-    if (matrix === "4321") return "3412";
-    return "1234";
-  }
+  const facts = [];
 
-  if (j === "ansiedad") {
-    if (matrix === "4321") return "2143";
-    return "2143";
-  }
+  // ES
+  let m = text.match(/(?:recuerda[:\s]*)?(?:el\s+)?animal\s+es\s+(?:el|la)?\s*([A-Za-zÀ-ÿ0-9 _-]{2,40})/i);
+  if (m && m[1]) facts.push({ key: "animal", value: cleanValue(m[1]) });
 
-  if (j === "límites") {
-    if (screen === "DCN") return "2143";
-    if (matrix === "4321") return "3412";
-    return matrix;
-  }
+  m = text.match(/(?:recuerda[:\s]*)?(?:la\s+)?ciudad\s+es\s+([A-Za-zÀ-ÿ0-9 _-]{2,40})/i);
+  if (m && m[1]) facts.push({ key: "ciudad", value: cleanValue(m[1]) });
 
-  if (j === "excesos") {
-    if (matrix === "3412") return "4321";
-    return matrix;
-  }
+  // CA
+  m = text.match(/(?:recorda[:\s]*)?(?:l['’]?\s*)?animal\s+és\s+(?:el|la)?\s*([A-Za-zÀ-ÿ0-9 _-]{2,40})/i);
+  if (m && m[1]) facts.push({ key: "animal", value: cleanValue(m[1]) });
 
-  if (j === "soltar") {
-    return "4321";
-  }
+  m = text.match(/(?:recorda[:\s]*)?(?:la\s+)?ciutat\s+és\s+([A-Za-zÀ-ÿ0-9 _-]{2,40})/i);
+  if (m && m[1]) facts.push({ key: "ciudad", value: cleanValue(m[1]) });
 
-  return matrix;
+  // EN
+  m = text.match(/(?:remember[:\s]*)?the\s+animal\s+is\s+(?:a|an|the)?\s*([A-Za-z0-9 _-]{2,40})/i);
+  if (m && m[1]) facts.push({ key: "animal", value: cleanValue(m[1]) });
+
+  m = text.match(/(?:remember[:\s]*)?the\s+city\s+is\s+([A-Za-z0-9 _-]{2,40})/i);
+  if (m && m[1]) facts.push({ key: "ciudad", value: cleanValue(m[1]) });
+
+  return facts;
 }
 
-/* ---------------- Memoria local: Recuerda/Olvida ---------------- */
-function ensureMemory(prev) {
-  const base = prev && typeof prev === "object" ? prev : {};
-  const mem = base.memory && typeof base.memory === "object" ? base.memory : {};
-  return { ...mem };
+function cleanValue(v) {
+  return String(v || "")
+    .replace(/[.?!]+$/g, "")
+    .trim()
+    .slice(0, 48);
 }
 
-function parseMemoryCommand(input, lang) {
-  const raw = String(input || "").trim();
-  const t = raw.toLowerCase();
+function updateMemory(prevMemory, facts) {
+  const mem = prevMemory && typeof prevMemory === "object" ? { ...prevMemory } : {};
+  const now = Date.now();
 
-  // Recuerda: clave = valor  |  Remember: key = value
-  const rememberRe = /^(recuerda|remember|recorda)\s*:?\s*(.+)$/i;
-  const forgetRe = /^(olvida|forget|oblida)\s*:?\s*(.+)$/i;
+  for (const f of facts) {
+    const key = f.key;
+    const value = f.value;
 
-  const m1 = raw.match(rememberRe);
-  if (m1) {
-    const payload = m1[2].trim();
-    // Permite "la ciudad es Barcelona" o "clave = valor"
-    const eq = payload.match(/^(.+?)\s*=\s*(.+)$/);
-    if (eq) {
-      return { op: "set", key: eq[1].trim(), value: eq[2].trim() };
+    const prev = mem[key];
+    // contradicción -> guardamos el último como presente (prioridad presente)
+    mem[key] = {
+      value,
+      t: now,
+      // guardamos historia mínima para AU
+      prev: prev ? { value: prev.value, t: prev.t } : null
+    };
+  }
+
+  return mem;
+}
+
+function isMemoryQuery(textRaw) {
+  const t = String(textRaw || "").toLowerCase();
+  // preguntas tipo: qué animal dije / cuál ciudad mencioné / what animal did i say
+  if (/(qué|que|cuál|cual).*(animal|ciudad)/.test(t)) return true;
+  if (/(what).*(animal|city).*(said|mentioned)/.test(t)) return true;
+  if (/(quin|quina|què).*(animal|ciutat)/.test(t)) return true;
+  return false;
+}
+
+function answerMemoryQuery(textRaw, memory, lang) {
+  const t = String(textRaw || "").toLowerCase();
+  const hasAnimal = memory?.animal?.value;
+  const hasCity = memory?.ciudad?.value;
+
+  const wantsAnimal = /(animal)/.test(t);
+  const wantsCity = /(ciudad|ciutat|city)/.test(t);
+
+  // respuesta mínima, factual
+  if (wantsAnimal && wantsCity) {
+    if (hasAnimal && hasCity) {
+      if (lang === "ca") return `L’animal és "${memory.animal.value}" i la ciutat és "${memory.ciudad.value}".`;
+      if (lang === "es") return `El animal es "${memory.animal.value}" y la ciudad es "${memory.ciudad.value}".`;
+      return `The animal is "${memory.animal.value}" and the city is "${memory.ciudad.value}".`;
     }
-    const esIs = payload.match(/^(.+?)\s+(es|era|son|=)\s+(.+)$/i);
-    if (esIs) {
-      return { op: "set", key: esIs[1].trim(), value: esIs[3].trim() };
+    if (lang === "ca") return "No tinc registrats l’animal i la ciutat en aquesta conversa.";
+    if (lang === "es") return "No tengo registrados el animal y la ciudad en esta conversación.";
+    return "I don’t have the animal and the city registered in this conversation.";
+  }
+
+  if (wantsAnimal) {
+    if (hasAnimal) {
+      if (lang === "ca") return `Vas dir: "${memory.animal.value}".`;
+      if (lang === "es") return `Dijiste: "${memory.animal.value}".`;
+      return `You said: "${memory.animal.value}".`;
     }
-    // fallback: no hay clave clara
-    return { op: "hint", message: lang === "es"
-      ? 'Formato: "Recuerda: clave = valor"'
-      : lang === "ca"
-      ? 'Format: "Recorda: clau = valor"'
-      : 'Format: "Remember: key = value"' };
+    if (lang === "ca") return "No tinc registrat cap animal en aquesta conversa.";
+    if (lang === "es") return "No tengo registrado ningún animal en esta conversación.";
+    return "I don’t have any animal registered in this conversation.";
   }
 
-  const m2 = raw.match(forgetRe);
-  if (m2) {
-    const key = m2[2].trim();
-    return { op: "del", key };
-  }
-
-  return null;
-}
-
-function memoryRecallResponse(input, memory, lang) {
-  const t = String(input || "").toLowerCase().trim();
-
-  // Preguntas tipo: "qué animal dije" / "what animal" / "quina ciutat"
-  const askAnimal = /(qué|que|what|quina)\s+animal/.test(t);
-  const askCity = /(qué|que|what|quina)\s+(ciudad|city|ciutat)/.test(t);
-  const askBoth = /(animal).*(ciudad|city|ciutat)|(ciudad|city|ciutat).*(animal)/.test(t);
-
-  const keys = Object.keys(memory || {});
-  const L = lang === "ca" ? "ca" : lang === "es" ? "es" : "en";
-
-  if (askBoth) {
-    const animal = memory?.animal ?? memory?.["el animal"] ?? memory?.["animal="] ?? null;
-    const city = memory?.ciudad ?? memory?.city ?? memory?.ciutat ?? memory?.["la ciudad"] ?? memory?.["la ciutat"] ?? null;
-
-    if (!animal && !city) {
-      return L === "es"
-        ? 'No tengo nada guardado aún. Usa: "Recuerda: animal = ..." y "Recuerda: ciudad = ..."'
-        : L === "ca"
-        ? 'Encara no tinc res guardat. Fes servir: "Recorda: animal = ..." i "Recorda: ciutat = ..."'
-        : 'I don’t have anything saved yet. Use: "Remember: animal = ..." and "Remember: city = ..."';
+  if (wantsCity) {
+    if (hasCity) {
+      if (lang === "ca") return `Vas dir: "${memory.ciudad.value}".`;
+      if (lang === "es") return `Dijiste: "${memory.ciudad.value}".`;
+      return `You said: "${memory.ciudad.value}".`;
     }
-
-    if (L === "es") return `Guardado: animal="${animal ?? "—"}", ciudad="${city ?? "—"}".`;
-    if (L === "ca") return `Desat: animal="${animal ?? "—"}", ciutat="${city ?? "—"}".`;
-    return `Saved: animal="${animal ?? "—"}", city="${city ?? "—"}".`;
+    if (lang === "ca") return "No tinc registrada cap ciutat en aquesta conversa.";
+    if (lang === "es") return "No tengo registrada ninguna ciudad en esta conversación.";
+    return "I don’t have any city registered in this conversation.";
   }
 
-  if (askAnimal) {
-    const animal = memory?.animal ?? memory?.["el animal"] ?? null;
-    if (!animal) {
-      return L === "es"
-        ? 'No tengo animal guardado. Usa: "Recuerda: animal = ..."'
-        : L === "ca"
-        ? 'No tinc cap animal desat. Usa: "Recorda: animal = ..."'
-        : 'No animal saved. Use: "Remember: animal = ..."';
-    }
-    return L === "es" ? `Dijiste: ${animal}.` : L === "ca" ? `Vas dir: ${animal}.` : `You said: ${animal}.`;
-  }
-
-  if (askCity) {
-    const city =
-      memory?.ciudad ?? memory?.city ?? memory?.ciutat ?? memory?.["la ciudad"] ?? memory?.["la ciutat"] ?? null;
-    if (!city) {
-      return L === "es"
-        ? 'No tengo ciudad guardada. Usa: "Recuerda: ciudad = ..."'
-        : L === "ca"
-        ? 'No tinc cap ciutat desada. Usa: "Recorda: ciutat = ..."'
-        : 'No city saved. Use: "Remember: city = ..."';
-    }
-    return L === "es" ? `Mencionaste: ${city}.` : L === "ca" ? `Vas mencionar: ${city}.` : `You mentioned: ${city}.`;
-  }
-
-  // "¿Qué has guardado?"
-  if (/(qué|que|what|què)\s+(has\s+guardado|have you saved|has desat)/.test(t)) {
-    if (!keys.length) {
-      return L === "es" ? "No hay nada guardado aún." : L === "ca" ? "Encara no hi ha res desat." : "Nothing saved yet.";
-    }
-    if (L === "es") return `Guardado: ${keys.join(", ")}.`;
-    if (L === "ca") return `Desat: ${keys.join(", ")}.`;
-    return `Saved: ${keys.join(", ")}.`;
-  }
-
-  return null;
+  // fallback
+  if (lang === "ca") return "No tinc aquest fet registrat en aquesta conversa.";
+  if (lang === "es") return "No tengo ese dato registrado en esta conversación.";
+  return "I don’t have that registered in this conversation.";
 }
 
-/* ---------------- Ciclo 1–3–9–27 ---------------- */
-function ensureCycle(prev) {
-  const c = prev?.cycle && typeof prev.cycle === "object" ? prev.cycle : {};
-  return {
-    step: typeof c.step === "number" ? c.step : 0,
-    stuck: typeof c.stuck === "number" ? c.stuck : 0,
-    band: c.band || 1,
-    lastCommitAt: typeof c.lastCommitAt === "number" ? c.lastCommitAt : 0,
-    d_live: typeof c.d_live === "number" ? c.d_live : 0.45,
-    ok_live: typeof c.ok_live === "number" ? c.ok_live : 0.5
-  };
+/* -------------------- Glifo signature (para tensión) -------------------- */
+function glifoSignature(glifos) {
+  return glifos.map((g) => `${g.op}${g.dom}`).join("|");
 }
 
-function bandFromStep(step) {
-  if (step < 3) return 1;
-  if (step < 9) return 3;
-  if (step < 27) return 9;
-  return 27;
-}
-
-function cycleUpdate(prevSession, au, signalsRaw) {
-  const prev = prevSession && typeof prevSession === "object" ? prevSession : {};
-  const cycle = ensureCycle(prev);
-
-  const last = prev?.last || null;
-  const lastMatrix = last?.matrix || null;
-  const lastD = typeof last?.signals?.d_raw === "number" ? last.signals.d_raw : null;
-
-  let inc = 0;
-  inc += 1; // input válido
-
-  if (lastMatrix && au.matrix !== lastMatrix) inc += 1;
-  if (typeof lastD === "number" && Math.abs(signalsRaw.d_raw - lastD) > 0.08) inc += 1;
-
-  // Estancamiento: misma matriz y d casi igual
-  const stuckNow =
-    lastMatrix &&
-    au.matrix === lastMatrix &&
-    typeof lastD === "number" &&
-    Math.abs(signalsRaw.d_raw - lastD) < 0.06;
-
-  if (stuckNow) cycle.stuck += 1;
-  else cycle.stuck = Math.max(0, cycle.stuck - 1);
-
-  cycle.step += inc;
-
-  const newBand = bandFromStep(cycle.step);
-  const bandChanged = newBand !== cycle.band;
-  cycle.band = newBand;
-
-  // phase 0..1 para animación lenta (respira)
-  const turnsInCycle = cycle.step % 9;
-  const phase = turnsInCycle / 9;
-
-  return { cycle, bandChanged, phase };
-}
-
-/* ---------------- Anti-loop AU (útil) ---------------- */
-function recentRepeatCount(chain, matrix, window = 5) {
-  if (!Array.isArray(chain) || chain.length === 0) return 0;
-  const slice = chain.slice(-window);
-  let n = 0;
-  for (let i = slice.length - 1; i >= 0; i--) {
-    if (slice[i]?.matrix === matrix) n += 1;
-    else break;
-  }
-  return n;
-}
-
-function antiLoopDecision(prevSession, au, d_raw) {
-  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
-  const rep = recentRepeatCount(chain, au.matrix, 5);
-
-  const last5 = chain.slice(-5);
-  const hasN0 = last5.some((x) => x?.N === "N0");
-  const n1Count = last5.filter((x) => x?.N === "N1").length;
-
-  if (hasN0) return "silence";
-  if (n1Count >= 2) return "silence";
-
-  // si 3 repeticiones -> rompe patrón
-  if (rep >= 3) return "break";
-
-  // si se repite 2143 mucho -> aterriza a 3412
-  if (au.matrix === "2143" && rep >= 2) return "ground";
-
-  // si d no se mueve y repites -> invertir lectura (mover a 2143)
-  const last = chain[chain.length - 1];
-  const lastD = typeof last?.d_raw === "number" ? last.d_raw : null;
-  if (rep >= 2 && typeof lastD === "number" && Math.abs(d_raw - lastD) < 0.05) return "invert";
-
-  return null;
-}
-
-function applyAntiToMatrix(matrix, anti, juramento) {
-  if (!anti) return matrix;
-
-  if (anti === "ground") return "3412";
-  if (anti === "invert") return "2143";
-
-  if (anti === "break") {
-    if (matrix === "3412") return "2143";
-    if (matrix === "1234") return "3412";
-    if (matrix === "2143") return normJuramento(juramento) === "ansiedad" ? "2143" : "1234";
-    if (matrix === "4321") return "3412";
-  }
-
-  return matrix;
-}
-
-/* ---------------- Señales AU: d, tone, W, ok ---------------- */
-function computeSignalsRaw(au, prevSession, juramento) {
-  // Base por matriz
-  let d_raw =
-    au.matrix === "1234" ? 0.20 :
-    au.matrix === "3412" ? 0.45 :
-    au.matrix === "2143" ? 0.58 :
-    au.matrix === "4321" ? 0.80 :
-    0.45;
-
-  // Screen empuja hacia ruptura
-  if (au.screen === "DCN") d_raw += 0.10;
-
-  // Juramento sesga
-  const j = normJuramento(juramento);
-  if (j === "disciplina") d_raw -= 0.06;
-  if (j === "ansiedad") d_raw += 0.06;
-  if (j === "excesos") d_raw += 0.08;
-  if (j === "soltar") d_raw += 0.12;
-  if (j === "límites") d_raw -= 0.02;
-
-  // Repetición (tensión)
-  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
-  const rep = recentRepeatCount(chain, au.matrix, 5);
-  if (rep >= 2 && (au.matrix === "3412" || au.matrix === "2143")) d_raw += 0.08;
-  if (rep >= 2 && au.matrix === "1234") d_raw -= 0.03;
-
-  d_raw = clamp01(d_raw);
-
-  // Tone por d (más agresivo)
-  let tone = "amber";
-  if (d_raw <= 0.28) tone = "green";
-  if (d_raw >= 0.68) tone = "red";
-
-  // W (barra): separado de d
-  let W =
-    au.matrix === "1234" ? 0.30 :
-    au.matrix === "3412" ? 0.50 :
-    au.matrix === "2143" ? 0.62 :
-    au.matrix === "4321" ? 0.78 :
-    0.50;
-
-  if (au.screen === "DCN") W += 0.05;
-  if (j === "disciplina") W -= 0.05;
-  if (j === "soltar") W += 0.06;
-  if (j === "ansiedad") W += 0.02;
-
-  W = clamp01(W);
-
-  return { d_raw, tone, W, sense: au.sense };
-}
-
-function okUpdate(prevOk, prevSession, au, d_live, d_raw, anti) {
-  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
-  const last = chain[chain.length - 1] || null;
-
-  let ok = typeof prevOk === "number" ? prevOk : 0.5;
-
-  // movimiento real de d mejora ok
-  if (last && typeof last?.d_raw === "number") {
-    const move = Math.abs(d_raw - last.d_raw);
-    if (move > 0.08) ok += 0.05;
-    if (move < 0.03) ok -= 0.03;
-  }
-
-  // variedad de matrices (últimos 5)
-  const last5 = chain.slice(-5);
-  const uniq = new Set(last5.map((x) => x?.matrix).filter(Boolean));
-  if (uniq.size >= 3) ok += 0.03;
-  if (uniq.size <= 1) ok -= 0.05;
-
-  // anti-loop útil sube; bucle baja
-  if (anti === "break" || anti === "ground") ok += 0.04;
-  if (anti === "invert") ok += 0.02;
-
-  // N penaliza fuerte
-  if (au.N_level === "N1") ok -= 0.12;
-  if (au.N_level === "N0") ok -= 0.25;
-
-  // mantener centro al inicio
-  ok = clamp01(ok);
-
-  // suavizado para que no oscile como máquina
-  return lerp(typeof prevOk === "number" ? prevOk : 0.5, ok, 0.35);
-}
-
-/* ---------------- ARPI cert (simple y visible) ---------------- */
+/* -------------------- ARPI cert -------------------- */
 function arpiCert(nextSessionObj) {
   const turns = nextSessionObj?.turns || 0;
   const chain = Array.isArray(nextSessionObj?.chain) ? nextSessionObj.chain : [];
@@ -487,18 +504,15 @@ function arpiCert(nextSessionObj) {
 
   const hasN0 = last5.some((x) => x?.N === "N0");
   const hasN1 = last5.some((x) => x?.N === "N1");
-  const band = nextSessionObj?.cycle?.band || 1;
-  const ok = typeof nextSessionObj?.cycle?.ok_live === "number" ? nextSessionObj.cycle.ok_live : 0.5;
 
-  if (turns < 2 || band === 1) return { level: "seed" };
+  if (turns < 2) return { level: "seed" };
   if (hasN0) return { level: "blocked" };
   if (hasN1) return { level: "unstable" };
-  if (ok >= 0.62 && band >= 3) return { level: "ok" };
-  return { level: "seed" };
+  return { level: "ok" };
 }
 
-/* ---------------- Session builder ---------------- */
-function nextSession(prev, au, signals, anti, cycle, phase, memory) {
+/* -------------------- Session build -------------------- */
+function nextSession(prev, au, signals, anti, glifos, memory) {
   const base = prev && typeof prev === "object" ? prev : {};
   const chain = Array.isArray(base.chain) ? base.chain : [];
 
@@ -507,25 +521,22 @@ function nextSession(prev, au, signals, anti, cycle, phase, memory) {
     turns: (base.turns || 0) + 1,
     silenceCount: base.silenceCount || 0,
     answerCount: base.answerCount || 0,
-    memory: memory || {},
-    cycle,
     last: { ...au, signals, anti },
+    memory: memory || base.memory || {},
     chain: [
-      ...chain.slice(-49),
+      ...chain.slice(-24),
       {
         t: Date.now(),
         matrix: au.matrix,
         sense: au.sense,
+        mode: au.mode,
+        screen: au.screen,
         N: au.N_level,
-        d_raw: signals.d_raw,
-        d: signals.d,     // d_live
+        d: signals.d,
         W: signals.W,
-        tone: signals.tone,
-        ok: signals.ok,
         intent: au.intervention,
         anti: anti || null,
-        band: cycle.band,
-        phase
+        glifoSig: glifoSignature(glifos)
       }
     ]
   };
@@ -533,7 +544,7 @@ function nextSession(prev, au, signals, anti, cycle, phase, memory) {
   return next;
 }
 
-/* -------------------------- API -------------------------- */
+/* -------------------- API -------------------- */
 export async function POST(req) {
   try {
     const body = await req.json();
@@ -541,170 +552,80 @@ export async function POST(req) {
     const session = body?.session || null;
     const juramento = body?.juramento || null;
 
-    const langHeader = req.headers.get("accept-language")?.slice(0, 2) || null;
-    const lang = langHeader || detectLangFromText(input);
-
     if (!input || String(input).trim().length < 3) {
-      // Devolvemos "seed" con señales base intermedias
-      const baseSignals = {
-        d_raw: 0.45,
-        d: 0.45,
-        tone: "amber",
-        W: 0.5,
-        sense: "direct",
-        ok: 0.5
-      };
-      return NextResponse.json({
-        output: null,
-        au: { mode: "GC", screen: "RAV", matrix: "3412", sense: "direct", intervention: "Answer", N_level: "N3", signals: baseSignals, anti: null },
-        session,
-        cert: { level: "seed" }
-      });
+      return NextResponse.json({ output: null, au: null, session, cert: { level: "seed" } });
     }
 
-    // 0) preparar memoria
-    const memory = ensureMemory(session);
+    const lang = detectLang(req, input);
 
-    // 1) Parse base
-    let au = parseAU(input);
+    // 0) memoria auto: extraer y actualizar antes de decidir intervención
+    const facts = extractFacts(input);
+    const prevMem = session?.memory || {};
+    const memory = facts.length ? updateMemory(prevMem, facts) : prevMem;
 
-    // 2) Coherencia juramento (operador)
-    au.matrix = applyJuramento(au.matrix, juramento, au.screen);
-    au.sense = au.matrix === "2143" ? "inverse" : "direct";
+    // 1) Lengua Cero: tokens + glifos
+    const tokens = detectTokens(input);
+    const glifos = tokensToGlifos(tokens);
 
-    // 3) Señales raw
-    const signalsRaw = computeSignalsRaw(au, session, juramento);
+    // 2) MODE + SCREEN
+    const mode = inferMode(input);
+    const screen = inferScreen(input);
 
-    // 4) Anti-loop decide
-    const anti = antiLoopDecision(session, au, signalsRaw.d_raw);
+    // 3) matriz por glifos (emergente) + juramento bias
+    let score = scoreMatrixFromGlifos(glifos);
+    score = applyJuramentoBias(score, juramento, screen);
+    let matrix = pickMatrix(score);
 
-    // 5) Anti-loop ajusta matriz
-    const adjusted = applyAntiToMatrix(au.matrix, anti, juramento);
-    if (adjusted !== au.matrix) {
-      au.matrix = adjusted;
+    // 4) Tensión + N
+    const T = computeTension(tokens, glifos, session);
+    let N_level = computeNLevel(tokens, input, T);
+
+    // 5) intervention
+    let intervention = "Answer";
+    if (N_level === "N0" || N_level === "N1") intervention = "Silence";
+    else if (tokens.has("ASK")) intervention = "StrategicQuestion";
+
+    // 6) sense
+    let sense = matrix === "2143" ? "inverse" : "direct";
+
+    // 7) signals iniciales
+    let au = { mode, screen, matrix, sense, intervention, N_level };
+
+    let signals = computeSignals(au, glifos, session, juramento, T);
+
+    // 8) anti-loop (decide con estado previo + signals)
+    const anti = antiLoopDecision(session, au, signals);
+    if (anti === "silence") {
+      au.intervention = "Silence";
+    } else {
+      const m2 = applyAntiToMatrix(au.matrix, anti);
+      au.matrix = m2;
       au.sense = au.matrix === "2143" ? "inverse" : "direct";
     }
 
-    // 6) Recalcular señales raw con matrix final (para coherencia)
-    const signalsRaw2 = computeSignalsRaw(au, session, juramento);
+    // 9) recompute signals post-anti
+    signals = computeSignals(au, glifos, session, juramento, T);
 
-    // 7) Ciclo update + phase
-    const { cycle, phase } = cycleUpdate(session, au, signalsRaw2);
+    // 10) construir session nueva
+    let newSession = nextSession(session, au, signals, anti, glifos, memory);
 
-    // 8) Suavizar d_live + ok_live (punto intermedio al inicio)
-    const prevCycle = ensureCycle(session);
-    const d_live = lerp(prevCycle.d_live ?? 0.45, signalsRaw2.d_raw, 0.18);
-
-    const ok_live = okUpdate(prevCycle.ok_live ?? 0.5, session, au, d_live, signalsRaw2.d_raw, anti);
-
-    cycle.d_live = d_live;
-    cycle.ok_live = ok_live;
-
-    // 9) Tone final (más dependiente de d_live para que el fondo cambie)
-    let tone = "amber";
-    if (d_live <= 0.28) tone = "green";
-    if (d_live >= 0.68) tone = "red";
-
-    // 10) signals finales
-    const signals = {
-      ...signalsRaw2,
-      d: d_live,
-      tone,
-      ok: ok_live,
-      band: cycle.band,
-      phase,
-      // anti se muestra fuera, pero lo duplicamos aquí para UI
-      anti
-    };
-
-    // 11) Comandos de memoria (Recuerda/Olvida)
-    const cmd = parseMemoryCommand(input, lang);
-    if (cmd?.op === "set") {
-      const k = cmd.key;
-      memory[k] = cmd.value;
-
-      // Alias útil: si la key contiene "animal"/"ciudad" etc
-      if (/animal/i.test(k)) memory.animal = cmd.value;
-      if (/(ciudad|city|ciutat)/i.test(k)) {
-        memory.ciudad = cmd.value;
-        memory.city = cmd.value;
-        memory.ciutat = cmd.value;
-      }
-    } else if (cmd?.op === "del") {
-      delete memory[cmd.key];
-      // si borras animal/ciudad directo también
-      if (/animal/i.test(cmd.key)) delete memory.animal;
-      if (/(ciudad|city|ciutat)/i.test(cmd.key)) {
-        delete memory.ciudad;
-        delete memory.city;
-        delete memory.ciutat;
-      }
-    }
-
-    // 12) construir session nueva (todavía sin counts)
-    let newSession = nextSession(session, au, signals, anti, cycle, phase, memory);
-
-    // 13) cert (ARPI)
+    // 11) cert
     const cert = arpiCert(newSession);
 
-    // 14) respuestas por memoria si aplica (recall)
-    //     (solo si no es comando directo de "recuerda/olvida", para no interferir)
-    if (!cmd) {
-      const recall = memoryRecallResponse(input, memory, lang);
-      if (recall) {
-        newSession.answerCount += 1;
-        return NextResponse.json({
-          output: recall,
-          au: { ...au, signals, anti },
-          session: newSession,
-          cert
-        });
-      }
-    }
-
-    // 15) hint de formato si cmd hint
-    if (cmd?.op === "hint") {
+    // 12) Si es consulta de memoria -> responder factual (no pregunta reactiva)
+    if (isMemoryQuery(input)) {
+      const out = answerMemoryQuery(input, memory, lang);
       newSession.answerCount += 1;
       return NextResponse.json({
-        output: cmd.message,
+        output: out,
         au: { ...au, signals, anti },
         session: newSession,
         cert
       });
     }
 
-    // 16) si cmd set/del: confirmación cerrada (no terapéutica)
-    if (cmd?.op === "set") {
-      newSession.answerCount += 1;
-      const msg =
-        lang === "es" ? `Guardado: ${cmd.key} = ${cmd.value}.`
-        : lang === "ca" ? `Desat: ${cmd.key} = ${cmd.value}.`
-        : `Saved: ${cmd.key} = ${cmd.value}.`;
-      return NextResponse.json({
-        output: msg,
-        au: { ...au, signals, anti },
-        session: newSession,
-        cert
-      });
-    }
-    if (cmd?.op === "del") {
-      newSession.answerCount += 1;
-      const msg =
-        lang === "es" ? `Olvidado: ${cmd.key}.`
-        : lang === "ca" ? `Oblidat: ${cmd.key}.`
-        : `Forgotten: ${cmd.key}.`;
-      return NextResponse.json({
-        output: msg,
-        au: { ...au, signals, anti },
-        session: newSession,
-        cert
-      });
-    }
-
-    // 17) Intervención efectiva
-    const effectiveSilence = au.intervention === "Silence" || anti === "silence";
-
-    if (effectiveSilence) {
+    // 13) SILENCE
+    if (au.intervention === "Silence") {
       newSession.silenceCount += 1;
       return NextResponse.json({
         output: "—",
@@ -714,10 +635,44 @@ export async function POST(req) {
       });
     }
 
+    // 14) Si el usuario ha aportado un hecho -> confirmación mínima (sin terapia)
+    if (facts.length) {
+      const pairs = facts
+        .map((f) => `${f.key}=${f.value}`)
+        .slice(0, 3)
+        .join(", ");
+
+      newSession.answerCount += 1;
+
+      if (lang === "ca") {
+        return NextResponse.json({
+          output: `D’acord. Registrat: ${pairs}.`,
+          au: { ...au, signals, anti },
+          session: newSession,
+          cert
+        });
+      }
+      if (lang === "es") {
+        return NextResponse.json({
+          output: `De acuerdo. Registrado: ${pairs}.`,
+          au: { ...au, signals, anti },
+          session: newSession,
+          cert
+        });
+      }
+      return NextResponse.json({
+        output: `Okay. Registered: ${pairs}.`,
+        au: { ...au, signals, anti },
+        session: newSession,
+        cert
+      });
+    }
+
+    // 15) STRATEGIC QUESTION
     if (au.intervention === "StrategicQuestion") {
       let q = strategicQuestion(au, lang);
 
-      // anti-break: recorta a una sola pregunta corta
+      // anti-break: más corto (sin sonar robótico)
       if (anti === "break") q = q.split("?")[0] + "?";
 
       newSession.answerCount += 1;
@@ -729,31 +684,40 @@ export async function POST(req) {
       });
     }
 
-    // 18) ANSWER via OpenAI (subordinado) — (idioma del usuario)
-    const prompt = `
-MODE: ${au.mode}
-SCREEN: ${au.screen}
-MATRIX: ${au.matrix}
-SENSE: ${au.sense}
-JURAMENTO: ${normJuramento(juramento) || "none"}
+    // 16) ANSWER (OpenAI) — ahora con glifos + memoria compacta
+    const memSummary = (() => {
+      const a = memory?.animal?.value ? `animal=${memory.animal.value}` : "";
+      const c = memory?.ciudad?.value ? `ciudad=${memory.ciudad.value}` : "";
+      const s = [a, c].filter(Boolean).join(" · ");
+      return s.length ? s : "none";
+    })();
 
-AU:
-- d=${signals.d.toFixed(2)} (0=continuidad, 1=ruptura)
-- W=${signals.W.toFixed(2)} (0=razón/estructura, 1=verdad/disolución)
-- ok=${signals.ok.toFixed(2)} (0=nok, 1=ok)
-- band=${signals.band}
+    const glifoSummary = glifos.slice(0, 8).map((g) => `${g.op}${g.dom}`).join(" ");
 
-RULES:
-- No advice
-- No reassurance
-- No follow-up invitation
-- One short intervention
-- Max 80 words
-- Respond in user's language (${lang}) unless the user clearly wrote in another language
-
-USER:
-${input}
-`;
+    const prompt = [
+      `AU_STATE:`,
+      `MODE=${au.mode}`,
+      `SCREEN=${au.screen}`,
+      `MATRIX=${au.matrix}`,
+      `SENSE=${au.sense}`,
+      `N=${au.N_level}`,
+      `D=${signals.d.toFixed(2)}`,
+      `W=${signals.W.toFixed(2)}`,
+      `ANTI=${anti || "none"}`,
+      `GLIFOS=${glifoSummary || "none"}`,
+      `MEMORY=${memSummary}`,
+      `JURAMENTO=${juramento || "none"}`,
+      ``,
+      `RULES:`,
+      `- No advice`,
+      `- No reassurance`,
+      `- No follow-up invitation`,
+      `- One short intervention (max 80 words)`,
+      `- Match user language (${lang}) unless user clearly wrote in another language`,
+      ``,
+      `USER:`,
+      String(input)
+    ].join("\n");
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -764,7 +728,7 @@ ${input}
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "You are Wancko’s AU language engine. Be precise, minimal, and closed." },
+          { role: "system", content: "You are Wancko’s AU language engine. You operate under AU signals and glifos." },
           { role: "user", content: prompt }
         ],
         temperature: 0.35
@@ -774,7 +738,7 @@ ${input}
     if (!res.ok) {
       newSession.answerCount += 1;
       return NextResponse.json({
-        output: lang === "es" ? "—" : lang === "ca" ? "—" : "—",
+        output: "—",
         au: { ...au, signals, anti },
         session: newSession,
         cert
@@ -784,7 +748,7 @@ ${input}
     const data = await res.json();
     let out = data?.choices?.[0]?.message?.content?.trim() || "—";
 
-    // anti-break: acorta si se alarga
+    // anti-break: recorta si el modelo se alarga
     if (anti === "break" && out.includes(".")) out = out.split(".")[0] + ".";
 
     newSession.answerCount += 1;
@@ -795,7 +759,7 @@ ${input}
       session: newSession,
       cert
     });
-  } catch {
+  } catch (e) {
     return NextResponse.json({ output: "—", au: null, session: null, cert: { level: "seed" } });
   }
 }
