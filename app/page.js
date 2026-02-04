@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * ✅ Sesiones separadas:
@@ -24,14 +24,12 @@ function labelGradiente(d) {
 }
 
 function antiLabel(anti) {
-  const a = anti?.action || anti; // soporta anti antiguo
-  if (!a || a === "none") return null;
-  if (a === "pause") return "pausa";
-  if (a === "break") return "romper bucle";
-  if (a === "ground") return "aterrizar";
-  if (a === "invert") return "invertir";
-  if (a === "shorten") return "acortar";
-  return a;
+  if (!anti) return null;
+  if (anti === "silence") return "pausa";
+  if (anti === "break") return "romper bucle";
+  if (anti === "ground") return "aterrizar";
+  if (anti === "invert") return "invertir";
+  return anti;
 }
 
 function certText(cert) {
@@ -42,32 +40,90 @@ function certText(cert) {
   return "ARPI · Semilla";
 }
 
+function small(x) {
+  if (x == null || Number.isNaN(x)) return "—";
+  return Number(x).toFixed(2);
+}
+
+/** ---------- Fondo Wancko (color + complejidad + belleza) ---------- */
+function wanckoBg(au, session) {
+  const tone = au?.signals?.tone || "amber";
+  const d = au?.signals?.d ?? 0.45;
+  const pos = `${Math.round(clamp01(d) * 100)}%`;
+
+  const complexity = au?.signals?.complexity ?? Math.log2(2 + (session?.turns ?? 0)) / 6;
+  const beauty = au?.signals?.beauty ?? 0.55;
+
+  // Capas:
+  // 1) base color
+  let base;
+  if (tone === "green") base = `radial-gradient(circle at ${pos} 42%, #0e3a22, #07160f 62%)`;
+  else if (tone === "red") base = `radial-gradient(circle at ${pos} 42%, #3a0e0e, #1a0707 62%)`;
+  else base = `radial-gradient(circle at ${pos} 42%, #3a3216, #14110b 62%)`;
+
+  // 2) complexity grain (algorítmico): más turns -> más líneas
+  const c = clamp01(complexity);
+  const lineA = 6 + Math.round(c * 14); // 6..20
+  const alphaA = 0.05 + c * 0.10; // 0.05..0.15
+  const grain = `repeating-linear-gradient(
+    135deg,
+    rgba(255,255,255,${alphaA}) 0px,
+    rgba(255,255,255,${alphaA}) 1px,
+    rgba(0,0,0,0) ${lineA}px,
+    rgba(0,0,0,0) ${lineA + 6}px
+  )`;
+
+  // 3) beauty glow (log): más belleza -> foco suave
+  const b = clamp01(beauty);
+  const glowAlpha = 0.06 + b * 0.10;
+  const glow = `radial-gradient(circle at 55% 30%, rgba(255,255,255,${glowAlpha}), rgba(0,0,0,0) 55%)`;
+
+  return `${glow}, ${grain}, ${base}`;
+}
+
+/** ---------- Fondo H-Wancko (día → violeta → noche + complejidad/belleza) ---------- */
+function hwanckoBg(au, session) {
+  const tone = au?.signals?.tone || "violet";
+  const d = au?.signals?.d ?? 0.55;
+  const pos = `${Math.round(clamp01(d) * 100)}%`;
+
+  const complexity = au?.signals?.complexity ?? Math.log2(2 + (session?.turns ?? 0)) / 6;
+  const beauty = au?.signals?.beauty ?? 0.55;
+
+  let base;
+  if (tone === "day") {
+    base = `radial-gradient(circle at ${pos} 42%, #f6fbff, #b8d6ff 55%, #4b56a6 110%)`;
+  } else if (tone === "night") {
+    base = `radial-gradient(circle at ${pos} 42%, #140b27, #07040f 65%, #000000 120%)`;
+  } else {
+    base = `radial-gradient(circle at ${pos} 42%, #7d3cff, #2a0b52 65%, #070410 120%)`;
+  }
+
+  // complexity lines (darker, subtle)
+  const c = clamp01(complexity);
+  const lineA = 8 + Math.round(c * 16);
+  const alphaA = 0.05 + c * 0.09;
+  const grain = `repeating-linear-gradient(
+    45deg,
+    rgba(0,0,0,${alphaA}) 0px,
+    rgba(0,0,0,${alphaA}) 1px,
+    rgba(0,0,0,0) ${lineA}px,
+    rgba(0,0,0,0) ${lineA + 8}px
+  )`;
+
+  // beauty highlight
+  const b = clamp01(beauty);
+  const glowAlpha = 0.08 + b * 0.10;
+  const glow = `radial-gradient(circle at 40% 22%, rgba(255,255,255,${glowAlpha}), rgba(0,0,0,0) 55%)`;
+
+  return `${glow}, ${grain}, ${base}`;
+}
+
 function detectLangUI(text) {
   const t = (text || "").toLowerCase();
-  if (/[àèéíïòóúüç·l]/.test(t) || /\b(qu[eè]|per què|m'ho)\b/.test(t)) return "ca";
-  if (/[áéíóúñ¿¡]/.test(t) || /\b(qué|que|por qué|recuerda|olvida|hoy|voy)\b/.test(t)) return "es";
+  if (/[àèéíïòóúüç·l]/.test(t) || /\b(qu[eè]|per què)\b/.test(t)) return "ca";
+  if (/[áéíóúñ¿¡]/.test(t) || /\b(qué|que|por qué|recuerda|olvida)\b/.test(t)) return "es";
   return "en";
-}
-
-function wanckoBg(au, fallbackD = 0.45) {
-  const tone = au?.signals?.tone || "amber";
-  const d = au?.signals?.d ?? fallbackD;
-  const pos = `${Math.round(clamp01(d) * 100)}%`;
-
-  if (tone === "green") return `radial-gradient(circle at ${pos} 42%, #0e3a22, #07160f 62%)`;
-  if (tone === "red") return `radial-gradient(circle at ${pos} 42%, #3a0e0e, #1a0707 62%)`;
-  return `radial-gradient(circle at ${pos} 42%, #3a3216, #14110b 62%)`;
-}
-
-function hwanckoBg(au, fallbackD = 0.55) {
-  // día → violeta → noche (d = luz)
-  const tone = au?.signals?.tone || "violet";
-  const d = au?.signals?.d ?? fallbackD;
-  const pos = `${Math.round(clamp01(d) * 100)}%`;
-
-  if (tone === "day") return `radial-gradient(circle at ${pos} 42%, #e9f2ff, #7fb0ff 55%, #2b2b5f 100%)`;
-  if (tone === "night") return `radial-gradient(circle at ${pos} 42%, #110a1f, #0b0614 60%, #000000 110%)`;
-  return `radial-gradient(circle at ${pos} 42%, #6c2bd9, #2b0b5f 60%, #0a0612 110%)`;
 }
 
 export default function Home() {
@@ -78,8 +134,10 @@ export default function Home() {
   const [wSession, setWSession] = useState(null);
   const [wAu, setWAu] = useState(null);
   const [wCert, setWCert] = useState(null);
+  const [wHai, setWHai] = useState(null);
+  const [wBaski, setWBaski] = useState(null);
   const [wChat, setWChat] = useState([]); // [{role, text, t}]
-  const [juramento, setJuramento] = useState(null);
+  const [juramento, setJuramento] = useState("");
 
   // H-Wancko
   const [hInput, setHInput] = useState("");
@@ -90,6 +148,8 @@ export default function Home() {
 
   const [loading, setLoading] = useState(false);
 
+  const chatRef = useRef(null);
+
   /* ---------------- LOAD ---------------- */
   useEffect(() => {
     try {
@@ -98,7 +158,7 @@ export default function Home() {
       if (s1) {
         const parsed = JSON.parse(s1);
         setWSession(parsed);
-        if (parsed?.juramento) setJuramento(parsed.juramento);
+        if (parsed?.juramento != null) setJuramento(parsed.juramento || "");
       }
       if (c1) setWChat(JSON.parse(c1));
 
@@ -124,27 +184,34 @@ export default function Home() {
     } catch {}
   }, [hSession, hChat]);
 
+  /* ---------------- AUTOSCROLL ---------------- */
+  useEffect(() => {
+    try {
+      if (!chatRef.current) return;
+      chatRef.current.scrollTop = chatRef.current.scrollHeight;
+    } catch {}
+  }, [tab, wChat, hChat]);
+
   /* ---------------- BACKGROUND ---------------- */
   const bg = useMemo(() => {
-    const wFallback = wSession?.cycle?.ok_live != null ? 0.45 : 0.45;
-    const hFallback = hSession?.cycle?.ok_live != null ? 0.55 : 0.55;
-    return tab === "wancko" ? wanckoBg(wAu, wFallback) : hwanckoBg(hAu, hFallback);
+    return tab === "wancko" ? wanckoBg(wAu, wSession) : hwanckoBg(hAu, hSession);
   }, [tab, wAu, hAu, wSession, hSession]);
 
   /* ---------------- INDICATORS (Wancko) ---------------- */
-  const w_d = wAu?.signals?.d ?? (wSession?.last?.signals?.d ?? null);
-  const w_W = wAu?.signals?.W ?? (wSession?.last?.signals?.W ?? 0.5);
-  const w_band = wAu?.signals?.band ?? wSession?.cycle?.band ?? 1;
-  const w_ok = wAu?.signals?.ok ?? wSession?.cycle?.ok_live ?? 0.5;
+  const w_d = wAu?.signals?.d ?? null;
+  const w_W = wAu?.signals?.W ?? 0.5;
+  const w_band = wAu?.signals?.band ?? 1;
+  const w_ok = wAu?.signals?.ok ?? 0.55;
+
+  const w_complexity = wAu?.signals?.complexity ?? (Math.log2(2 + (wSession?.turns ?? 0)) / 6);
+  const w_beauty = wAu?.signals?.beauty ?? 0.55;
 
   /* ---------------- INDICATORS (H-Wancko) ---------------- */
-  const h_d = hAu?.signals?.d ?? (hSession?.last?.signals?.d ?? null);
-  const h_ok = hAu?.signals?.ok ?? hSession?.cycle?.ok_live ?? 0.55;
-  const h_bar = hAu?.signals?.bar ?? 0.5;
-  const h_band = hSession?.cycle?.band ?? 1;
-
-  const hTone = hAu?.signals?.tone || "violet";
-  const hText = hTone === "night" ? "#eae7ff" : "#0c1020"; // ✅ legible
+  const h_d = hAu?.signals?.d ?? null;
+  const h_band = hAu?.signals?.band ?? 1;
+  const h_ok = hAu?.signals?.ok ?? 0.55;
+  const h_complexity = hAu?.signals?.complexity ?? (Math.log2(2 + (hSession?.turns ?? 0)) / 6);
+  const h_beauty = hAu?.signals?.beauty ?? 0.55;
 
   /* ---------------- SUBMIT (Wancko) ---------------- */
   async function sendWancko() {
@@ -156,14 +223,12 @@ export default function Home() {
     setWChat((prev) => [...prev, { role: "user", text: userText, t: Date.now() }]);
 
     try {
-      const lang = detectLangUI(userText);
-
       const res = await fetch("/api/wancko", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Accept-Language": lang },
+        headers: { "Content-Type": "application/json", "Accept-Language": detectLangUI(userText) },
         body: JSON.stringify({
           input: userText,
-          juramento,
+          juramento: juramento || null,
           session: wSession || null
         })
       });
@@ -173,6 +238,8 @@ export default function Home() {
       setWAu(data.au || null);
       setWSession(data.session || null);
       setWCert(data.cert || null);
+      setWHai(data.hai || null);
+      setWBaski(data.baski || null);
 
       const out = data.output === null ? "—" : data.output;
       setWChat((prev) => [...prev, { role: "assistant", text: out, t: Date.now() }]);
@@ -228,6 +295,8 @@ export default function Home() {
       setWSession(null);
       setWAu(null);
       setWCert(null);
+      setWHai(null);
+      setWBaski(null);
       try {
         localStorage.removeItem(LS_W_CHAT);
         localStorage.removeItem(LS_W_SESSION);
@@ -243,27 +312,31 @@ export default function Home() {
     }
   }
 
+  const isHW = tab === "hwancko";
+  const fg = isHW ? "#0c1020" : "#eaeaea";
+
   return (
     <main
       style={{
         minHeight: "100vh",
         background: bg,
-        color: tab === "hwancko" ? hText : "#eaeaea",
+        color: fg,
         fontFamily: "system-ui",
         padding: "68px 20px",
         transition: "background 650ms ease"
       }}
     >
-      <div style={{ maxWidth: 860, margin: "0 auto" }}>
+      <div style={{ maxWidth: 920, margin: "0 auto" }}>
+        {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <h1 style={{ margin: 0, letterSpacing: 0.2 }}>
               {tab === "wancko" ? "Wancko" : "H-Wancko"}
             </h1>
-            <p style={{ opacity: tab === "hwancko" ? 0.78 : 0.65, marginTop: 8 }}>
+            <p style={{ opacity: isHW ? 0.8 : 0.65, marginTop: 8, maxWidth: 540 }}>
               {tab === "wancko"
-                ? "Natural assistant aligned with AU."
-                : "Historical operator. Human voice. Mirror AU."}
+                ? "Operador AU (objetividad AU). Memoria por glifos. Color y barra dependen del hilo."
+                : "Operador histórico espejo (subjetividad AU). Luz día/violeta/noche. Voz humana por figura."}
             </p>
           </div>
 
@@ -275,7 +348,7 @@ export default function Home() {
                 borderRadius: 999,
                 border: "1px solid rgba(255,255,255,0.18)",
                 background: tab === "wancko" ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.22)",
-                color: tab === "hwancko" ? hText : "#eaeaea",
+                color: fg,
                 cursor: "pointer"
               }}
             >
@@ -288,7 +361,7 @@ export default function Home() {
                 borderRadius: 999,
                 border: "1px solid rgba(255,255,255,0.18)",
                 background: tab === "hwancko" ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.22)",
-                color: tab === "hwancko" ? hText : "#eaeaea",
+                color: fg,
                 cursor: "pointer"
               }}
             >
@@ -302,7 +375,7 @@ export default function Home() {
                 borderRadius: 999,
                 border: "1px solid rgba(255,255,255,0.18)",
                 background: "rgba(0,0,0,0.22)",
-                color: tab === "hwancko" ? hText : "#eaeaea",
+                color: fg,
                 cursor: "pointer"
               }}
               title="Borrar conversación de este modo"
@@ -310,20 +383,50 @@ export default function Home() {
               Reset
             </button>
 
-            {/* ARPI badge visible solo en Wancko */}
+            {/* Badges (Wancko) */}
             {tab === "wancko" && (
-              <div
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 999,
-                  border: "1px solid rgba(255,255,255,0.14)",
-                  background: "rgba(0,0,0,0.22)",
-                  fontSize: 13,
-                  opacity: 0.92
-                }}
-              >
-                {certText(wCert)}
-              </div>
+              <>
+                <div
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 999,
+                    border: "1px solid rgba(255,255,255,0.14)",
+                    background: "rgba(0,0,0,0.22)",
+                    fontSize: 13,
+                    opacity: 0.92
+                  }}
+                >
+                  {certText(wCert)}
+                </div>
+
+                <div
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 999,
+                    border: "1px solid rgba(255,255,255,0.14)",
+                    background: "rgba(0,0,0,0.22)",
+                    fontSize: 13,
+                    opacity: 0.9
+                  }}
+                  title="HAI · valor/acuerdo cruzado"
+                >
+                  HAI · {small(wHai?.v)}
+                </div>
+
+                <div
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 999,
+                    border: "1px solid rgba(255,255,255,0.14)",
+                    background: "rgba(0,0,0,0.22)",
+                    fontSize: 13,
+                    opacity: 0.9
+                  }}
+                  title="Baski · control cruzado"
+                >
+                  Baski · {small(wBaski?.c)}
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -333,8 +436,8 @@ export default function Home() {
           {tab === "wancko" ? (
             <>
               <select
-                value={juramento || ""}
-                onChange={(e) => setJuramento(e.target.value || null)}
+                value={juramento}
+                onChange={(e) => setJuramento(e.target.value)}
                 style={{
                   padding: 10,
                   background: "rgba(0,0,0,0.35)",
@@ -351,8 +454,8 @@ export default function Home() {
                 <option value="soltar">Soltar</option>
               </select>
 
-              <div style={{ opacity: 0.7, fontSize: 13 }}>
-                Band: <b>{w_band}</b> · OK: <b>{w_ok.toFixed(2)}</b>
+              <div style={{ opacity: 0.75, fontSize: 13 }}>
+                Band: <b>{w_band}</b> · OK: <b>{small(w_ok)}</b> · Complejidad: <b>{small(w_complexity)}</b> · Belleza: <b>{small(w_beauty)}</b>
               </div>
             </>
           ) : (
@@ -362,10 +465,10 @@ export default function Home() {
                 onChange={(e) => setArchetype(e.target.value)}
                 style={{
                   padding: 10,
-                  background: "rgba(255,255,255,0.22)",
-                  color: hText,
+                  background: "rgba(255,255,255,0.28)",
+                  color: "#0c1020",
                   borderRadius: 10,
-                  border: "1px solid rgba(255,255,255,0.35)"
+                  border: "1px solid rgba(255,255,255,0.38)"
                 }}
               >
                 <option value="estoic">Estoic</option>
@@ -374,21 +477,21 @@ export default function Home() {
                 <option value="poet">Poet</option>
               </select>
 
-              <div style={{ opacity: 0.85, fontSize: 13, color: hText }}>
-                Band: <b>{h_band}</b> · OK: <b>{h_ok.toFixed(2)}</b>
+              <div style={{ opacity: 0.9, fontSize: 13, color: "#0c1020" }}>
+                Band: <b>{h_band}</b> · OK: <b>{small(h_ok)}</b> · Complejidad: <b>{small(h_complexity)}</b> · Belleza: <b>{small(h_beauty)}</b>
               </div>
             </>
           )}
         </div>
 
-        {/* AU strip (Wancko) */}
-        {tab === "wancko" && (wAu || wSession?.last) && (
+        {/* AU strip */}
+        {tab === "wancko" && wAu && (
           <div style={{ marginTop: 16, opacity: 0.92, fontSize: 13 }}>
             <div>
-              <span style={{ opacity: 0.6 }}>Mode:</span> {(wAu || wSession?.last)?.mode || "—"} ·{" "}
-              <span style={{ opacity: 0.6 }}>Screen:</span> {(wAu || wSession?.last)?.screen || "—"} ·{" "}
-              <span style={{ opacity: 0.6 }}>Matrix:</span> {(wAu || wSession?.last)?.matrix || "—"} ·{" "}
-              <span style={{ opacity: 0.6 }}>N:</span> {(wAu || wSession?.last)?.N_level || "—"}
+              <span style={{ opacity: 0.6 }}>Mode:</span> {wAu.mode} ·{" "}
+              <span style={{ opacity: 0.6 }}>Screen:</span> {wAu.screen} ·{" "}
+              <span style={{ opacity: 0.6 }}>Matrix:</span> {wAu.matrix} ·{" "}
+              <span style={{ opacity: 0.6 }}>N:</span> {wAu.N_level}
             </div>
 
             <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
@@ -405,12 +508,12 @@ export default function Home() {
               </div>
 
               <div style={{ opacity: 0.6 }}>
-                {(wAu?.signals?.sense || wSession?.last?.signals?.sense) === "inverse" ? "lectura inversa" : "lectura directa"}
+                {wAu.signals?.sense === "inverse" ? "lectura inversa" : "lectura directa"}
               </div>
 
-              {antiLabel(wAu?.anti || wAu?.signals?.anti || wSession?.last?.anti || wSession?.last?.signals?.anti) && (
+              {wAu.anti && (
                 <div style={{ opacity: 0.6 }}>
-                  anti-loop: {antiLabel(wAu?.anti || wAu?.signals?.anti || wSession?.last?.anti || wSession?.last?.signals?.anti)}
+                  anti-loop: {antiLabel(wAu.anti)}
                 </div>
               )}
             </div>
@@ -444,13 +547,12 @@ export default function Home() {
           </div>
         )}
 
-        {/* AU strip (H-Wancko) */}
-        {tab === "hwancko" && (hAu || hSession?.last) && (
-          <div style={{ marginTop: 16, opacity: 0.92, fontSize: 13, color: hText }}>
+        {tab === "hwancko" && hAu && (
+          <div style={{ marginTop: 16, opacity: 0.95, fontSize: 13, color: "#0c1020" }}>
             <div>
-              <span style={{ opacity: 0.75 }}>Screen:</span> {(hAu || hSession?.last)?.screen || "—"} ·{" "}
-              <span style={{ opacity: 0.75 }}>Matrix:</span> {(hAu || hSession?.last)?.matrix || "—"} ·{" "}
-              <span style={{ opacity: 0.75 }}>N:</span> {(hAu || hSession?.last)?.N_level || "—"}
+              <span style={{ opacity: 0.7 }}>Screen:</span> {hAu.screen} ·{" "}
+              <span style={{ opacity: 0.7 }}>Matrix:</span> {hAu.matrix} ·{" "}
+              <span style={{ opacity: 0.7 }}>N:</span> {hAu.N_level}
             </div>
 
             <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
@@ -459,41 +561,14 @@ export default function Home() {
                 style={{
                   padding: "6px 10px",
                   borderRadius: 999,
-                  border: "1px solid rgba(255,255,255,0.35)",
-                  background: "rgba(255,255,255,0.22)"
+                  border: "1px solid rgba(255,255,255,0.40)",
+                  background: "rgba(255,255,255,0.28)"
                 }}
               >
                 {h_d != null ? `d=${h_d.toFixed(2)}` : "—"}
               </div>
               <div style={{ opacity: 0.8 }}>
-                {hTone === "day" ? "día" : hTone === "night" ? "noche" : "crepúsculo"}
-              </div>
-            </div>
-
-            {/* Light BAR */}
-            <div style={{ marginTop: 10 }}>
-              <div style={{ opacity: 0.75, marginBottom: 6 }}>L · Night ↔ Day</div>
-              <div
-                style={{
-                  height: 10,
-                  background: "rgba(255,255,255,0.28)",
-                  borderRadius: 999,
-                  position: "relative"
-                }}
-              >
-                <div
-                  style={{
-                    position: "absolute",
-                    left: `${clamp01(h_bar) * 100}%`,
-                    top: -4,
-                    width: 18,
-                    height: 18,
-                    borderRadius: "50%",
-                    background: hText,
-                    transform: "translateX(-50%)",
-                    transition: "left 500ms ease"
-                  }}
-                />
+                {hAu.signals?.tone === "day" ? "día" : hAu.signals?.tone === "night" ? "noche" : "crepúsculo"}
               </div>
             </div>
           </div>
@@ -501,19 +576,22 @@ export default function Home() {
 
         {/* Chat */}
         <div
+          ref={chatRef}
           style={{
             marginTop: 18,
             padding: 14,
             borderRadius: 16,
-            border: tab === "hwancko" ? "1px solid rgba(255,255,255,0.35)" : "1px solid rgba(255,255,255,0.12)",
-            background: tab === "hwancko" ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.25)"
+            border: tab === "hwancko" ? "1px solid rgba(255,255,255,0.38)" : "1px solid rgba(255,255,255,0.12)",
+            background: tab === "hwancko" ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
+            maxHeight: "52vh",
+            overflowY: "auto"
           }}
         >
           {activeChat.length === 0 ? (
-            <div style={{ opacity: tab === "hwancko" ? 0.85 : 0.6, color: tab === "hwancko" ? hText : "#eaeaea" }}>
+            <div style={{ opacity: tab === "hwancko" ? 0.85 : 0.6 }}>
               {tab === "wancko"
-                ? 'Tip: di algo normal (ej: "Hoy voy a ir a la playa") y luego pregúntame "¿dónde dije que iba?"'
-                : "Tip: pregunta “¿quién eres?” y repite el tema: verás que no responde como plantilla."}
+                ? 'Tip: di cosas normales y luego pregunta: "¿Dónde dije que iba?" (memoria por glifos).'
+                : 'Tip: pregunta "¿Quién eres?" y repite para ver cómo cambia la luz y la voz sin volverse máquina.'}
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -527,18 +605,19 @@ export default function Home() {
                     borderRadius: 14,
                     border:
                       tab === "hwancko"
-                        ? "1px solid rgba(255,255,255,0.35)"
+                        ? "1px solid rgba(255,255,255,0.40)"
                         : "1px solid rgba(255,255,255,0.14)",
                     background:
                       m.role === "user"
                         ? tab === "hwancko"
-                          ? "rgba(255,255,255,0.35)"
+                          ? "rgba(255,255,255,0.45)"
                           : "rgba(255,255,255,0.10)"
                         : tab === "hwancko"
-                        ? "rgba(255,255,255,0.18)"
+                        ? "rgba(255,255,255,0.26)"
                         : "rgba(0,0,0,0.22)",
-                    color: tab === "hwancko" ? hText : "#eaeaea",
-                    whiteSpace: "pre-wrap"
+                    color: tab === "hwancko" ? "#0c1020" : "#eaeaea",
+                    whiteSpace: "pre-wrap",
+                    lineHeight: 1.35
                   }}
                 >
                   {m.text}
@@ -553,55 +632,60 @@ export default function Home() {
           <textarea
             value={tab === "wancko" ? wInput : hInput}
             onChange={(e) => (tab === "wancko" ? setWInput(e.target.value) : setHInput(e.target.value))}
-            placeholder={tab === "wancko" ? 'Escribe aquí… (ej: "Hoy voy a ir a la playa")' : "Escribe aquí…"}
+            placeholder={tab === "wancko" ? "Escribe aquí… (ej: Hoy voy a ir a la playa)" : "Escribe aquí…"}
             rows={4}
             style={{
               width: "100%",
               padding: 14,
               fontSize: 16,
-              background: tab === "hwancko" ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)",
-              color: tab === "hwancko" ? hText : "#eaeaea",
-              border: tab === "hwancko" ? "1px solid rgba(255,255,255,0.45)" : "1px solid rgba(255,255,255,0.14)",
-              borderRadius: 12
+              background: tab === "hwancko" ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.35)",
+              color: tab === "hwancko" ? "#0c1020" : "#eaeaea",
+              border: tab === "hwancko" ? "1px solid rgba(255,255,255,0.55)" : "1px solid rgba(255,255,255,0.14)",
+              borderRadius: 12,
+              outline: "none"
             }}
             disabled={loading}
+            onKeyDown={(e) => {
+              if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                e.preventDefault();
+                tab === "wancko" ? sendWancko() : sendHWancko();
+              }
+            }}
           />
 
-          <button
-            onClick={tab === "wancko" ? sendWancko : sendHWancko}
-            disabled={loading}
-            style={{
-              marginTop: 12,
-              padding: "10px 16px",
-              fontSize: 16,
-              borderRadius: 12,
-              border: tab === "hwancko" ? "1px solid rgba(255,255,255,0.55)" : "1px solid rgba(255,255,255,0.18)",
-              background: tab === "hwancko" ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.08)",
-              color: tab === "hwancko" ? hText : "#eaeaea",
-              cursor: "pointer"
-            }}
-          >
-            {loading ? "…" : "Send"}
-          </button>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <button
+              onClick={tab === "wancko" ? sendWancko : sendHWancko}
+              disabled={loading}
+              style={{
+                marginTop: 12,
+                padding: "10px 16px",
+                fontSize: 16,
+                borderRadius: 12,
+                border: tab === "hwancko" ? "1px solid rgba(255,255,255,0.60)" : "1px solid rgba(255,255,255,0.18)",
+                background: tab === "hwancko" ? "rgba(255,255,255,0.45)" : "rgba(255,255,255,0.08)",
+                color: tab === "hwancko" ? "#0c1020" : "#eaeaea",
+                cursor: "pointer"
+              }}
+            >
+              {loading ? "…" : "Send"}
+            </button>
 
-          {/* Meta */}
-          <div
-            style={{
-              marginTop: 10,
-              opacity: tab === "hwancko" ? 0.88 : 0.5,
-              fontSize: 12,
-              color: tab === "hwancko" ? hText : "#eaeaea"
-            }}
-          >
-            {tab === "wancko" ? (
-              <>
-                Turns: {wSession?.turns ?? 0} · Chain: {wSession?.chain?.length ?? 0} · Silences: {wSession?.silenceCount ?? 0}
-              </>
-            ) : (
-              <>
-                Turns: {hSession?.turns ?? 0} · Chain: {hSession?.chain?.length ?? 0}
-              </>
-            )}
+            <div style={{ marginTop: 12, opacity: tab === "hwancko" ? 0.9 : 0.6, fontSize: 12, color: fg }}>
+              {tab === "wancko" ? (
+                <>
+                  Turns: {wSession?.turns ?? 0} · Chain: {wSession?.chain?.length ?? 0} · Silences: {wSession?.silenceCount ?? 0} · Lang: <b>{wSession?.lang ?? "—"}</b>
+                  {" · "}
+                  <span style={{ opacity: 0.75 }}>Ctrl/⌘+Enter para enviar</span>
+                </>
+              ) : (
+                <>
+                  Turns: {hSession?.turns ?? 0} · Chain: {hSession?.chain?.length ?? 0} · Lang: <b>{hSession?.lang ?? "—"}</b>
+                  {" · "}
+                  <span style={{ opacity: 0.8 }}>Ctrl/⌘+Enter para enviar</span>
+                </>
+              )}
+            </div>
           </div>
         </div>
       </div>
