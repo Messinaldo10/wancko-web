@@ -1,392 +1,315 @@
 import { NextResponse } from "next/server";
 
 /** =========================================================
- *  H-WANCKO — Historical Operator (Mirror AU) + CSA v0.1
- *  - Sesión separada de Wancko
- *  - Memoria implícita propia (recuerda sin “Recuerda:”)
- *  - Paleta día → violeta → noche (d = luz) + texto legible
- *  - Arquetipos humanos (LLM) sin muletillas repetidas
+ *  H-WANCKO API — Mirror AU v0.3
+ *  - Respuesta humana por arquetipo (LLM)
+ *  - Memoria separada (no mezclada con Wancko)
+ *  - AU complementario: luz (d) + tono day/violet/night
+ *  - Evita repetición: si se parece demasiado, fuerza variación
  * ========================================================= */
 
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
-function norm(s) {
-  return String(s || "").trim();
+function norm(str) {
+  return String(str || "").trim();
 }
-function normLower(s) {
-  return norm(s).toLowerCase();
+function normLower(str) {
+  return norm(str).toLowerCase();
 }
-function safeLangFromHeader(req) {
-  const h = req.headers.get("accept-language") || "";
-  const l = h.slice(0, 2).toLowerCase();
-  return l === "es" || l === "ca" || l === "en" ? l : "en";
+function safeObj(x) {
+  return x && typeof x === "object" ? x : {};
 }
-function nowTs() {
-  return Date.now();
+function array(x) {
+  return Array.isArray(x) ? x : [];
 }
 
-/* ---------------- CSA (same structure, separate session) ---------------- */
+/** ---- language lock (separate) ---- */
+function detectLang(text) {
+  const t = normLower(text);
+  if (/[àèéíïòóúüç·l]/.test(t) || /\b(per què|què|això|avui|m'ho)\b/.test(t)) return "ca";
+  if (/[áéíóúñ¿¡]/.test(t) || /\b(qué|por qué|hoy|voy|montaña|playa)\b/.test(t)) return "es";
+  return "en";
+}
+function getLangLock(prevSession, req, input) {
+  const s = safeObj(prevSession);
+  const explicit = normLower(input);
 
-function initCSA() {
-  return {
-    facts: {},
-    entities: {},
-    timeline: [],
-    stats: { turns: 0, drift: 0.18, novelty: 0.25 }
-  };
+  if (/(responde en catal[aà]n|en catal[aà]n)/.test(explicit)) return "ca";
+  if (/(responde en espa[nñ]ol|en espa[nñ]ol|en castellano)/.test(explicit)) return "es";
+  if (/(answer in english|in english|respond in english)/.test(explicit)) return "en";
+
+  if (s.lang_lock) return s.lang_lock;
+
+  const header = req.headers.get("accept-language")?.slice(0, 2);
+  const h = header === "es" || header === "ca" || header === "en" ? header : null;
+  return h || detectLang(input);
 }
 
-function csaDecay(csa) {
-  for (const k of Object.keys(csa.facts || {})) {
-    csa.facts[k].ttl -= 1;
-    if (csa.facts[k].ttl <= 0) delete csa.facts[k];
-  }
-  for (const t of Object.keys(csa.entities || {})) {
-    for (const v of Object.keys(csa.entities[t] || {})) {
-      csa.entities[t][v].ttl -= 1;
-      if (csa.entities[t][v].ttl <= 0) delete csa.entities[t][v];
-    }
-    if (Object.keys(csa.entities[t] || {}).length === 0) delete csa.entities[t];
-  }
-}
-
-function csaTouchEntity(csa, type, value, turn, w = 0.55, ttl = 8) {
-  if (!value) return;
-  const t = String(type || "misc");
-  const v = String(value).trim();
-  if (!v) return;
-
-  if (!csa.entities[t]) csa.entities[t] = {};
-  const prev = csa.entities[t][v];
-  csa.entities[t][v] = {
-    weight: clamp01((prev?.weight ?? 0.0) * 0.55 + w * 0.7),
-    ttl: Math.max(prev?.ttl ?? 0, ttl),
-    lastTurn: turn
-  };
-
-  csa.timeline.push({ turn, key: `${t}:${v}`, w: csa.entities[t][v].weight });
-  csa.timeline = csa.timeline.slice(-48);
-}
-
-function csaTopEntity(csa, type) {
-  const bucket = csa?.entities?.[type];
-  if (!bucket) return null;
-  let best = null;
-  for (const [v, meta] of Object.entries(bucket)) {
-    const score = (meta?.weight ?? 0) + (meta?.ttl ?? 0) * 0.02;
-    if (!best || score > best.score) best = { value: v, score, meta };
-  }
-  return best?.value || null;
-}
-
-function extractImplicitMemory(input) {
-  const text = normLower(input);
-
-  const animals = [
-    "cabra","gorila","perro","gato","caballo","vaca","oveja","pollo","pato","conejo",
-    "goat","gorilla","dog","cat","horse","cow","sheep","chicken","duck","rabbit"
-  ];
-
-  const animalMatch =
-    text.match(/\b(animal)\b.*?\b(es|=|:\s*)\s*([a-záéíóúñç·lüï]+)\b/) ||
-    text.match(/\b(the animal)\b.*?\b(is|=|:\s*)\s*([a-z]+)\b/);
-
-  const cityMatch =
-    text.match(/\b(ciudad)\b.*?\b(es|=|:\s*)\s*([a-záéíóúñç·lüï]+)\b/) ||
-    text.match(/\b(city)\b.*?\b(is|=|:\s*)\s*([a-z]+)\b/);
-
-  const beach = /\b(playa|platja|beach)\b/.test(text)
-    ? (/\b(platja)\b/.test(text) ? "platja" : "playa")
-    : null;
-
-  const found = { animal: null, city: null, place: null };
-
-  if (animalMatch) found.animal = animalMatch[3] || animalMatch[2];
-  else {
-    for (const a of animals) {
-      if (text.includes(` ${a} `) || text.endsWith(` ${a}`) || text.startsWith(`${a} `)) {
-        found.animal = a;
-        break;
-      }
-    }
-  }
-
-  if (cityMatch) found.city = cityMatch[3] || cityMatch[2];
-  if (beach) found.place = beach;
-
-  return found;
-}
-
-function isMemoryQuestion(input) {
-  const t = normLower(input);
-  return (
-    /\b(qué|que|what)\b.*\b(animal|ciudad|city|place|lugar)\b/.test(t) ||
-    /\b(dime|tell me)\b.*\b(animal|ciudad|city|place|lugar)\b/.test(t) ||
-    /\b(sabes|do you know)\b.*\b(donde|where)\b/.test(t)
-  );
-}
-
-function answerFromMemory(input, lang, csa) {
-  const t = normLower(input);
-
-  if (/\b(animal)\b/.test(t)) {
-    const a = csaTopEntity(csa, "animal");
-    if (!a) return lang === "es" ? "Aún no lo tengo fijado." : lang === "ca" ? "Encara no ho tinc fixat." : "I haven’t fixed that yet.";
-    return lang === "es" ? `Has dicho: ${a}.` : lang === "ca" ? `Has dit: ${a}.` : `You said: ${a}.`;
-  }
-
-  if (/\b(ciudad|city)\b/.test(t)) {
-    const c = csaTopEntity(csa, "city");
-    if (!c) return lang === "es" ? "Aún no lo tengo fijado." : lang === "ca" ? "Encara no ho tinc fixat." : "I haven’t fixed that yet.";
-    return lang === "es" ? `Has dicho: ${c}.` : lang === "ca" ? `Has dit: ${c}.` : `You said: ${c}.`;
-  }
-
-  if (/\b(donde|where|lugar|place)\b/.test(t)) {
-    const p = csaTopEntity(csa, "place");
-    if (!p) return lang === "es" ? "No tengo un lugar fijado en esta conversación." : lang === "ca" ? "No tinc cap lloc fixat en aquesta conversa." : "I don’t have a place fixed in this conversation.";
-    return lang === "es" ? `Has insinuado: ${p}.` : lang === "ca" ? `Has insinuat: ${p}.` : `You implied: ${p}.`;
-  }
-
-  return null;
-}
-
-/* ---------------- AU for H (mirror) ---------------- */
-
+/** ---- lightweight AU parse (mirror) ---- */
 function parseAU(input) {
   const text = normLower(input);
 
-  const screen =
-    /(tired|empty|burnout|agotad|vac[ií]o|cansad|esgotad|buit)/.test(text) ? "DCN" : "RAV";
+  const screen = /(tired|empty|burnout|agotad|vac[ií]o|cansad)/.test(text) ? "DCN" : "RAV";
 
-  // base matrix: more “poetic” defaults to 2143 for ontological questions
   let matrix = "3412";
-  if (/(let go|release|soltar|prou|basta)/.test(text)) matrix = "4321";
-  else if (/(should|must|debo|tengo que|cal|hauria|he de)/.test(text)) matrix = "1234";
-  else if (/\?$/.test(text) || /(qué es|que es|what is|qui ets|who are you|exist)/.test(text)) matrix = "2143";
+
+  if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) {
+    matrix = "1234";
+  } else if (
+    /(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text) ||
+    /\?$/.test(text) ||
+    /(qué es|que es|what is|què és)/.test(text)
+  ) {
+    matrix = "2143";
+  } else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
+    matrix = "4321";
+  }
 
   let N_level = "N3";
-  if (/(panic|obsessed|ansiedad|obses)/.test(text)) N_level = "N2";
+  if (/(panic|obsessed|ansiedad|obses)/.test(text)) N_level = "N1";
   if (/(harm|force|violence|dañar|forzar)/.test(text)) N_level = "N0";
 
-  // Mirror sense: keep sense but H uses it as “voice operator”
   const sense = matrix === "2143" ? "inverse" : "direct";
 
   return { screen, matrix, sense, N_level };
 }
 
-// Map Wancko-like d to LIGHT (mirror)
-function hSignals(au, prevSession, csa) {
-  // Wancko base d
-  let d_base =
-    au.matrix === "1234" ? 0.20 :
-    au.matrix === "3412" ? 0.46 :
-    au.matrix === "2143" ? 0.60 :
-    au.matrix === "4321" ? 0.82 :
-    0.46;
+/** mirror mapping: inverse family to Wancko */
+function invertMatrixForArchetype(matrix) {
+  const m = String(matrix);
+  // complementary swap
+  if (m === "1234") return "4321";
+  if (m === "4321") return "1234";
+  if (m === "2143") return "3412";
+  if (m === "3412") return "2143";
+  return "3412";
+}
 
-  if (au.screen === "DCN") d_base += 0.08;
-  d_base = clamp01(d_base);
+/** signals: d = luz (alto => día) */
+function hSignals(au, prevSession, archetype) {
+  // base by (mirrored) matrix
+  const m = au.matrix;
+  let d =
+    m === "1234" ? 0.78 :
+    m === "2143" ? 0.60 :
+    m === "3412" ? 0.52 :
+    m === "4321" ? 0.35 :
+    0.55;
 
-  // Mirror: light is inverse of rupture
-  let d = clamp01(1 - d_base);
+  if (au.screen === "DCN") d -= 0.08;
 
-  // CSA influence: H values “omnipresent”—lower novelty => more day
-  const novelty = typeof csa?.stats?.novelty === "number" ? csa.stats.novelty : 0.25;
-  d += (0.30 - novelty) * 0.20;
+  const a = normLower(archetype);
+  // archetype bias (subtle but visible)
+  if (a === "mystic") d -= 0.04;
+  if (a === "warrior") d += 0.03;
+  if (a === "poet") d -= 0.02;
+
   d = clamp01(d);
 
   let tone = "violet";
-  if (d >= 0.68) tone = "day";
-  if (d <= 0.32) tone = "night";
+  if (d >= 0.72) tone = "day";
+  if (d <= 0.38) tone = "night";
 
-  return { d, tone };
-}
-
-function updateCycle(prevCycle, au, signals, csa) {
-  const base = prevCycle && typeof prevCycle === "object" ? prevCycle : { band: 1, ok_live: 0.5 };
-
-  const novelty = typeof csa?.stats?.novelty === "number" ? csa.stats.novelty : 0.25;
-  let ok = typeof base.ok_live === "number" ? base.ok_live : 0.5;
-
-  // H OK: rewards “structural consistency” (low novelty)
-  ok += (0.30 - novelty) * 0.25;
-  if (au.N_level === "N0") ok -= 0.18;
-  ok = ok * 0.92 + 0.5 * 0.08;
+  // ok proxy (mirror)
+  let ok = 0.5;
+  if (au.N_level === "N3") ok += 0.10;
+  if (au.N_level === "N1") ok -= 0.14;
+  if (au.N_level === "N0") ok -= 0.25;
+  ok += (d - 0.55) * 0.10;
   ok = clamp01(ok);
 
-  // band by LIGHT d
-  let band = 2;
-  const d = signals.d;
-  if (d < 0.30) band = 4;
-  else if (d < 0.55) band = 3;
-  else if (d < 0.78) band = 2;
-  else band = 1;
+  // bar (objective complement): 0..1
+  const bar = clamp01(0.35 + (d - 0.5) * 0.9);
 
-  return { band, ok_live: ok };
+  return { d, tone, ok, bar };
 }
 
-function nextSession(prev, au, signals, csa, cycle) {
-  const base = prev && typeof prev === "object" ? prev : {};
-  const chain = Array.isArray(base.chain) ? base.chain : [];
+/** session */
+function nextSession(prev, au, signals, archetype, lang) {
+  const base = safeObj(prev);
+  const chain = array(base.chain);
 
-  return {
+  const next = {
     v: 2,
+    lang_lock: lang,
     turns: (base.turns || 0) + 1,
+    archetype: archetype || base.archetype || "estoic",
     last: { ...au, signals },
-    csa,
-    cycle,
     chain: [
       ...chain.slice(-29),
-      { t: nowTs(), matrix: au.matrix, N: au.N_level, d: signals.d }
-    ]
+      {
+        t: Date.now(),
+        matrix: au.matrix,
+        N: au.N_level,
+        d: signals.d,
+        tone: signals.tone,
+        ok: signals.ok
+      }
+    ],
+    cycle: {
+      band: Math.max(1, Math.min(4, 1 + (au.matrix === "1234" ? 0 : au.matrix === "2143" ? 1 : au.matrix === "3412" ? 2 : 3))),
+      ok_live: signals.ok
+    },
+    // repetition guard
+    last_out: base.last_out || ""
   };
+
+  return next;
 }
 
-/* ---------------- LLM (H-Wancko human voice) ---------------- */
+/** repetition detector */
+function tooSimilar(a, b) {
+  const A = normLower(a);
+  const B = normLower(b);
+  if (!A || !B) return false;
+  // crude similarity: shared long prefix or many shared words
+  const aWords = new Set(A.split(/\s+/).filter((x) => x.length > 4));
+  const bWords = new Set(B.split(/\s+/).filter((x) => x.length > 4));
+  let overlap = 0;
+  for (const w of aWords) if (bWords.has(w)) overlap += 1;
+  return overlap >= 6 || (A.slice(0, 40) && A.slice(0, 40) === B.slice(0, 40));
+}
 
-const ARCHETYPES = {
+const ARCH = {
   estoic: {
-    name: "Stoic",
-    style: "clear, grounded, minimal ego, disciplined, calm authority",
-    constraints: "No therapy. No advice. No reassurance. No cheerleading. No follow-up invitation."
+    label: "Estoic",
+    voice: "a restrained, lucid human voice; firm but respectful; zero ornament",
+    lexical: "short sentences; concrete nouns; no poetry"
   },
   mystic: {
-    name: "Mystic",
-    style: "symbolic, lucid, precise, not vague; speaks like a human with inner sight",
-    constraints: "No therapy. No advice. No reassurance. No follow-up invitation."
+    label: "Mystic",
+    voice: "a human voice with symbolic perception; calm, precise; not grandiose",
+    lexical: "one symbolic image maximum; avoid clichés"
   },
   warrior: {
-    name: "Warrior",
-    style: "direct, concrete, decisive, honors cost and duty; not aggressive",
-    constraints: "No therapy. No advice. No reassurance. No follow-up invitation."
+    label: "Warrior",
+    voice: "a human voice with resolve; direct; energetic; not aggressive",
+    lexical: "verbs; decisions; minimal adjectives"
   },
   poet: {
-    name: "Poet",
-    style: "sensory, exact imagery, no clichés; human warmth without comfort",
-    constraints: "No therapy. No advice. No reassurance. No follow-up invitation."
+    label: "Poet",
+    voice: "a human voice with lyrical clarity; tender; disciplined; not vague",
+    lexical: "metaphor allowed but anchored; no riddle spam"
   }
 };
 
-async function hLLM({ input, lang, archetype, au, signals, memoryHints }) {
-  const A = ARCHETYPES[archetype] || ARCHETYPES.estoic;
+export async function POST(req) {
+  try {
+    const body = await req.json();
+    const input = norm(body?.input);
+    const archetype = ARCH[body?.archetype] ? body.archetype : "estoic";
+    const sessionIn = body?.session || null;
 
-  const system = `You are H-Wancko, a historical operator.
-You speak as a human voice (${A.name}). Style: ${A.style}.
-Constraints: ${A.constraints}
-Never repeat stock phrases. Avoid slogans. Avoid meta talk.`;
+    const session0 = safeObj(sessionIn);
+    const lang = getLangLock(session0, req, input);
 
-  const prompt = `
-LANG: ${lang}
+    if (!input || input.length < 2) {
+      const seedSession = {
+        ...session0,
+        lang_lock: lang,
+        cycle: session0.cycle || { band: 1, ok_live: 0.55 }
+      };
+      return NextResponse.json({ output: null, au: null, session: seedSession });
+    }
+
+    let au = parseAU(input);
+    // mirror mapping
+    au.matrix = invertMatrixForArchetype(au.matrix);
+
+    const signals = hSignals(au, session0, archetype);
+    let session = nextSession(session0, au, signals, archetype, lang);
+
+    const memorySummary = (() => {
+      const last = array(session.chain).slice(-3).map((x) => `${x.matrix}/${x.tone}`).join(" · ");
+      return last || "—";
+    })();
+
+    const a = ARCH[archetype];
+
+    const prompt = `
+LANG_LOCK: ${lang}
+ARCHETYPE: ${a.label}
+VOICE: ${a.voice}
+STYLE: ${a.lexical}
+
 SCREEN: ${au.screen}
 MATRIX: ${au.matrix}
-N: ${au.N_level}
 LIGHT_D: ${signals.d.toFixed(2)}
 TONE: ${signals.tone}
+OK_LIVE: ${signals.ok.toFixed(2)}
 
-MEMORY_HINTS (use only if relevant, do not invent):
-${memoryHints}
+RECENT TRACE:
+${memorySummary}
 
 RULES:
-- One short human utterance (1–4 sentences)
-- 18–70 words
-- No advice / reassurance / follow-up invitation
+- You are a person speaking (historical operator), not a machine.
+- No therapy. No advice. No diagnosis. No “tell me more”.
+- Do not repeat the same cadence. Avoid templated lines.
+- 1 concise paragraph (max 75 words).
+- Write in ${lang}.
+- If user asks “who are you?”, answer in-character, grounded.
 
 USER:
 ${input}
-`;
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.65
-    })
-  });
+TASK:
+Respond as the archetype, preserving continuity.
+`.trim();
 
-  if (!res.ok) return "—";
-  const data = await res.json();
-  return data?.choices?.[0]?.message?.content?.trim() || "—";
-}
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You are H-Wancko: archetypal human voice. Keep continuity within this chat." },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.75
+      })
+    });
 
-/* ---------------- API ---------------- */
-
-export async function POST(req) {
-  try {
-    const { input, archetype, session } = await req.json();
-
-    if (!input || norm(input).length < 2) {
-      return NextResponse.json({ output: null, au: null, session: session || null });
+    let out = "—";
+    if (res.ok) {
+      const data = await res.json();
+      out = data?.choices?.[0]?.message?.content?.trim() || "—";
     }
 
-    const lang = safeLangFromHeader(req);
-    const key = ARCHETYPES[archetype] ? archetype : "estoic";
-
-    // CSA
-    const prevCSA = session?.csa && typeof session.csa === "object" ? session.csa : initCSA();
-    const turn = (session?.turns || 0) + 1;
-    const csa = JSON.parse(JSON.stringify(prevCSA));
-    csaDecay(csa);
-    csa.stats.turns = turn;
-
-    const found = extractImplicitMemory(input);
-    if (found.animal) csaTouchEntity(csa, "animal", found.animal, turn, 0.78, 14);
-    if (found.city) csaTouchEntity(csa, "city", found.city, turn, 0.72, 12);
-    if (found.place) csaTouchEntity(csa, "place", found.place, turn, 0.62, 9);
-
-    const recent = Array.isArray(csa.timeline) ? csa.timeline.slice(-10) : [];
-    const uniq = new Set(recent.map((x) => x.key));
-    const novelty = clamp01(uniq.size / 10);
-    csa.stats.novelty = novelty;
-    csa.stats.drift = clamp01(novelty * 0.45 + 0.15);
-
-    // AU
-    const au = parseAU(input);
-    const signals = hSignals(au, session, csa);
-    const cycle = updateCycle(session?.cycle, au, signals, csa);
-    const newSession = nextSession(session, au, signals, csa, cycle);
-
-    // Memory Q
-    const memQ = isMemoryQuestion(input);
-    if (memQ) {
-      const m = answerFromMemory(input, lang, csa);
-      if (m) {
-        return NextResponse.json({
-          output: m,
-          au: { ...au, signals: { ...signals, ok: cycle.ok_live } },
-          session: newSession
-        });
+    // anti-repetition: if too similar to last_out, ask model again with variation
+    if (out !== "—" && tooSimilar(out, session.last_out)) {
+      const reprompt = prompt + `\n\nCONSTRAINT:\n- Avoid repeating previous phrasing. Use different cadence.`;
+      const res2 = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: "Rewrite with fresh phrasing; keep same meaning and voice." },
+            { role: "user", content: reprompt }
+          ],
+          temperature: 0.9
+        })
+      });
+      if (res2.ok) {
+        const d2 = await res2.json();
+        const o2 = d2?.choices?.[0]?.message?.content?.trim();
+        if (o2) out = o2;
       }
     }
 
-    const memoryHints = [
-      `animal=${csaTopEntity(csa, "animal") || "—"}`,
-      `city=${csaTopEntity(csa, "city") || "—"}`,
-      `place=${csaTopEntity(csa, "place") || "—"}`
-    ].join("\n");
-
-    const out = await hLLM({
-      input,
-      lang,
-      archetype: key,
-      au,
-      signals,
-      memoryHints
-    });
+    session.last_out = out;
 
     return NextResponse.json({
       output: out,
-      au: { ...au, signals: { ...signals, ok: cycle.ok_live } },
-      session: newSession,
-      meta: { archetype: key, historical: true }
+      au: { ...au, signals },
+      session
     });
   } catch {
     return NextResponse.json({
