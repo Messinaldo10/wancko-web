@@ -45,33 +45,61 @@ function wanckoBg(au) {
   const d = au?.signals?.d ?? 0.45;
   const pos = `${Math.round(clamp01(d) * 100)}%`;
 
-  if (tone === "green")
-    return `radial-gradient(circle at ${pos} 42%, #0e3a22, #07160f 62%)`;
-  if (tone === "red")
-    return `radial-gradient(circle at ${pos} 42%, #3a0e0e, #1a0707 62%)`;
+  if (tone === "green") return `radial-gradient(circle at ${pos} 42%, #0e3a22, #07160f 62%)`;
+  if (tone === "red") return `radial-gradient(circle at ${pos} 42%, #3a0e0e, #1a0707 62%)`;
   return `radial-gradient(circle at ${pos} 42%, #3a3216, #14110b 62%)`;
 }
 
 function hwanckoBg(au) {
-  // ✅ C-2: día → violeta → noche (S = luz)
-  const tone = au?.tone || au?.signals?.tone || "twilight";
-  const S = au?.S ?? au?.signals?.d ?? 0.55;
-  const pos = `${Math.round(clamp01(S) * 100)}%`;
+  // día → violeta → noche (d = luz)
+  const tone = au?.signals?.tone || "violet";
+  const d = au?.signals?.d ?? 0.55;
+  const pos = `${Math.round(clamp01(d) * 100)}%`;
 
-  if (tone === "day")
-    return `radial-gradient(circle at ${pos} 42%, #e9f2ff, #7fb0ff 55%, #2b2b5f 100%)`;
-  if (tone === "night")
-    return `radial-gradient(circle at ${pos} 42%, #110a1f, #0b0614 60%, #000000 110%)`;
-  // twilight
-  return `radial-gradient(circle at ${pos} 42%, #6c2bd9, #2b0b5f 60%, #0a0612 110%)`;
+  if (tone === "day") return `radial-gradient(circle at ${pos} 42%, #f4fbff, #b8d7ff 55%, #3a3a7a 110%)`;
+  if (tone === "night") return `radial-gradient(circle at ${pos} 42%, #0b0614, #06030d 60%, #000000 120%)`;
+  return `radial-gradient(circle at ${pos} 42%, #7a38ff, #2b0b5f 60%, #07050f 120%)`;
 }
 
 function detectLangUI(text) {
   const t = (text || "").toLowerCase();
   if (/[àèéíïòóúüç·l]/.test(t) || /\b(qu[eè]|per què)\b/.test(t)) return "ca";
-  if (/[áéíóúñ¿¡]/.test(t) || /\b(qué|que|por qué|recuerda|olvida)\b/.test(t))
-    return "es";
+  if (/[áéíóúñ¿¡]/.test(t) || /\b(qué|que|por qué|recuerda|olvida)\b/.test(t)) return "es";
   return "en";
+}
+
+// Render “memoria activa” SIN mostrar valores sensibles por defecto.
+// Mostramos tipos y las claves más probables (y si quieres, luego añadimos toggle para revelar).
+function extractMemorySummary(session) {
+  const csa = session?.csa;
+  if (!csa || typeof csa !== "object") return { items: [], total: 0 };
+
+  const items = [];
+  const entities = csa.entities || {};
+  const facts = csa.facts || {};
+
+  // entities: show top 1–2 per type (only label + weight/ttl)
+  for (const [type, bucket] of Object.entries(entities)) {
+    const arr = Object.entries(bucket || {}).map(([value, meta]) => ({
+      type,
+      value,
+      w: meta?.weight ?? 0,
+      ttl: meta?.ttl ?? 0,
+      last: meta?.lastTurn ?? 0
+    }));
+    arr.sort((a, b) => (b.w + b.ttl * 0.02) - (a.w + a.ttl * 0.02));
+    arr.slice(0, 2).forEach((x) => items.push(x));
+  }
+
+  // facts: show keys only
+  for (const [k, v] of Object.entries(facts)) {
+    items.push({ type: "fact", value: k, w: v?.weight ?? 0, ttl: v?.ttl ?? 0, last: v?.lastTurn ?? 0 });
+  }
+
+  items.sort((a, b) => (b.w + b.ttl * 0.02) - (a.w + a.ttl * 0.02));
+  const top = items.slice(0, 6);
+
+  return { items: top, total: items.length };
 }
 
 export default function Home() {
@@ -116,11 +144,7 @@ export default function Home() {
   /* ---------------- SAVE ---------------- */
   useEffect(() => {
     try {
-      if (wSession)
-        localStorage.setItem(
-          LS_W_SESSION,
-          JSON.stringify({ ...wSession, juramento })
-        );
+      if (wSession) localStorage.setItem(LS_W_SESSION, JSON.stringify({ ...wSession, juramento }));
       localStorage.setItem(LS_W_CHAT, JSON.stringify(wChat));
     } catch {}
   }, [wSession, wChat, juramento]);
@@ -138,17 +162,19 @@ export default function Home() {
   }, [tab, wAu, hAu]);
 
   /* ---------------- INDICATORS ---------------- */
-  // Wancko
   const w_d = wAu?.signals?.d ?? null;
   const w_W = wAu?.signals?.W ?? 0.5;
-  const w_band = wAu?.signals?.band ?? wSession?.cycle?.band ?? 1;
-  const w_ok = wAu?.signals?.ok ?? wSession?.cycle?.ok_live ?? 0.5;
+  const w_band = wSession?.cycle?.band ?? 2;
+  const w_ok = wSession?.cycle?.ok_live ?? 0.5;
 
-  // ✅ H-Wancko C-2
-  const h_S = hAu?.S ?? null; // luz
-  const h_tone = hAu?.tone || "twilight";
-  const h_band = hAu?.band ?? hSession?.cycle?.band ?? 1;
-  const h_ok = hAu?.ok ?? hSession?.cycle?.ok_live ?? 0.5;
+  const h_d = hAu?.signals?.d ?? null;
+  const h_band = hSession?.cycle?.band ?? 2;
+  const h_ok = hSession?.cycle?.ok_live ?? 0.5;
+
+  // H foreground: depends on tone (night needs light text)
+  const hTone = hAu?.signals?.tone || "violet";
+  const hFg = hTone === "night" ? "#eaeaea" : "#0c1020";
+  const hSubFg = hTone === "night" ? "rgba(255,255,255,0.78)" : "rgba(12,16,32,0.78)";
 
   /* ---------------- SUBMIT (Wancko) ---------------- */
   async function sendWancko() {
@@ -164,7 +190,7 @@ export default function Home() {
     try {
       const res = await fetch("/api/wancko", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Accept-Language": detectLangUI(userText) },
         body: JSON.stringify({
           input: userText,
           juramento,
@@ -181,10 +207,7 @@ export default function Home() {
       const out = data.output === null ? "—" : data.output;
       setWChat((prev) => [...prev, { role: "assistant", text: out, t: Date.now() }]);
     } catch {
-      setWChat((prev) => [
-        ...prev,
-        { role: "assistant", text: "Wancko could not respond.", t: Date.now() }
-      ]);
+      setWChat((prev) => [...prev, { role: "assistant", text: "Wancko could not respond.", t: Date.now() }]);
     } finally {
       setLoading(false);
     }
@@ -216,17 +239,13 @@ export default function Home() {
 
       const data = await res.json();
 
-      // ✅ C-2: { output, au, session }
       setHAu(data.au || null);
       setHSession(data.session || null);
 
       const out = data.output === null ? "—" : data.output;
       setHChat((prev) => [...prev, { role: "assistant", text: out, t: Date.now() }]);
     } catch {
-      setHChat((prev) => [
-        ...prev,
-        { role: "assistant", text: "H-Wancko could not respond.", t: Date.now() }
-      ]);
+      setHChat((prev) => [...prev, { role: "assistant", text: "H-Wancko could not respond.", t: Date.now() }]);
     } finally {
       setLoading(false);
     }
@@ -256,23 +275,15 @@ export default function Home() {
     }
   }
 
-  // ✅ Legibilidad H-Wancko (texto claro SIEMPRE)
-  const isH = tab === "hwancko";
-  const mainTextColor = isH ? "#f2f2f6" : "#eaeaea";
-  const subTextOpacity = isH ? 0.82 : 0.65;
-
-  // ✅ Estilo control H-Wancko (más contrastado)
-  const hPanelBorder = "1px solid rgba(255,255,255,0.22)";
-  const hPanelBg = "rgba(0,0,0,0.25)";
-  const hUserBubbleBg = "rgba(255,255,255,0.14)";
-  const hAssistantBubbleBg = "rgba(0,0,0,0.30)";
+  const wMem = useMemo(() => extractMemorySummary(wSession), [wSession]);
+  const hMem = useMemo(() => extractMemorySummary(hSession), [hSession]);
 
   return (
     <main
       style={{
         minHeight: "100vh",
         background: bg,
-        color: mainTextColor,
+        color: tab === "hwancko" ? hFg : "#eaeaea",
         fontFamily: "system-ui",
         padding: "68px 20px",
         transition: "background 650ms ease"
@@ -284,7 +295,7 @@ export default function Home() {
             <h1 style={{ margin: 0, letterSpacing: 0.2 }}>
               {tab === "wancko" ? "Wancko" : "H-Wancko"}
             </h1>
-            <p style={{ opacity: subTextOpacity, marginTop: 8 }}>
+            <p style={{ opacity: tab === "hwancko" ? 0.82 : 0.65, marginTop: 8, color: tab === "hwancko" ? hSubFg : "rgba(234,234,234,0.65)" }}>
               {tab === "wancko"
                 ? "Natural assistant aligned with AU."
                 : "Historical operator. Human voice. Mirror AU."}
@@ -299,7 +310,7 @@ export default function Home() {
                 borderRadius: 999,
                 border: "1px solid rgba(255,255,255,0.18)",
                 background: tab === "wancko" ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.22)",
-                color: mainTextColor,
+                color: tab === "hwancko" ? hFg : "#eaeaea",
                 cursor: "pointer"
               }}
             >
@@ -311,8 +322,8 @@ export default function Home() {
                 padding: "10px 12px",
                 borderRadius: 999,
                 border: "1px solid rgba(255,255,255,0.18)",
-                background: tab === "hwancko" ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.22)",
-                color: mainTextColor,
+                background: tab === "hwancko" ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.22)",
+                color: tab === "hwancko" ? hFg : "#eaeaea",
                 cursor: "pointer"
               }}
             >
@@ -326,7 +337,7 @@ export default function Home() {
                 borderRadius: 999,
                 border: "1px solid rgba(255,255,255,0.18)",
                 background: "rgba(0,0,0,0.22)",
-                color: mainTextColor,
+                color: tab === "hwancko" ? hFg : "#eaeaea",
                 cursor: "pointer"
               }}
               title="Borrar conversación de este modo"
@@ -386,10 +397,10 @@ export default function Home() {
                 onChange={(e) => setArchetype(e.target.value)}
                 style={{
                   padding: 10,
-                  background: "rgba(0,0,0,0.30)",
-                  color: "#f2f2f6",
+                  background: hTone === "night" ? "rgba(0,0,0,0.35)" : "rgba(255,255,255,0.22)",
+                  color: hFg,
                   borderRadius: 10,
-                  border: "1px solid rgba(255,255,255,0.22)"
+                  border: hTone === "night" ? "1px solid rgba(255,255,255,0.25)" : "1px solid rgba(255,255,255,0.35)"
                 }}
               >
                 <option value="estoic">Estoic</option>
@@ -398,7 +409,7 @@ export default function Home() {
                 <option value="poet">Poet</option>
               </select>
 
-              <div style={{ opacity: 0.85, fontSize: 13 }}>
+              <div style={{ opacity: 0.85, fontSize: 13, color: hSubFg }}>
                 Band: <b>{h_band}</b> · OK: <b>{h_ok.toFixed(2)}</b>
               </div>
             </>
@@ -465,45 +476,88 @@ export default function Home() {
                 />
               </div>
             </div>
+
+            {/* Memory active */}
+            <div style={{ marginTop: 12, opacity: 0.85 }}>
+              <div style={{ opacity: 0.6, marginBottom: 6 }}>
+                Memoria activa · {wMem.total}
+              </div>
+              {wMem.items.length === 0 ? (
+                <div style={{ opacity: 0.6 }}>—</div>
+              ) : (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {wMem.items.map((it, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 999,
+                        border: "1px solid rgba(255,255,255,0.14)",
+                        background: "rgba(0,0,0,0.22)",
+                        fontSize: 12
+                      }}
+                      title={`ttl=${it.ttl} · w=${(it.w ?? 0).toFixed(2)}`}
+                    >
+                      {it.type}:{String(it.value).slice(0, 22)}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {/* ✅ H-Wancko strip (C-2) con legibilidad + barra S */}
         {tab === "hwancko" && hAu && (
-          <div style={{ marginTop: 16, opacity: 0.95, fontSize: 13 }}>
+          <div style={{ marginTop: 16, opacity: 0.92, fontSize: 13, color: hFg }}>
             <div>
-              <span style={{ opacity: 0.75 }}>Screen:</span> {hAu.screen || "—"} ·{" "}
-              <span style={{ opacity: 0.75 }}>Matrix:</span> {hAu.matrix || "—"} ·{" "}
-              <span style={{ opacity: 0.75 }}>N:</span> {hAu.N_level || "—"} ·{" "}
-              <span style={{ opacity: 0.75 }}>Luz:</span>{" "}
-              {h_tone === "day" ? "día" : h_tone === "night" ? "noche" : "crepúsculo"}
+              <span style={{ opacity: 0.75 }}>Screen:</span> {hAu.screen} ·{" "}
+              <span style={{ opacity: 0.75 }}>Matrix:</span> {hAu.matrix} ·{" "}
+              <span style={{ opacity: 0.75 }}>N:</span> {hAu.N_level}
             </div>
 
-            {/* S BAR */}
-            <div style={{ marginTop: 10 }}>
-              <div style={{ opacity: 0.75, marginBottom: 6 }}>S · Subjetividad ↔ Objetividad</div>
+            <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ opacity: 0.75 }}>Luz:</div>
               <div
                 style={{
-                  height: 10,
-                  background: "rgba(255,255,255,0.18)",
+                  padding: "6px 10px",
                   borderRadius: 999,
-                  position: "relative"
+                  border: hTone === "night" ? "1px solid rgba(255,255,255,0.25)" : "1px solid rgba(255,255,255,0.35)",
+                  background: hTone === "night" ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.22)"
                 }}
               >
-                <div
-                  style={{
-                    position: "absolute",
-                    left: `${clamp01(h_S ?? 0.5) * 100}%`,
-                    top: -4,
-                    width: 18,
-                    height: 18,
-                    borderRadius: "50%",
-                    background: "#fff",
-                    transform: "translateX(-50%)",
-                    transition: "left 650ms ease"
-                  }}
-                />
+                {h_d != null ? `d=${h_d.toFixed(2)}` : "—"}
               </div>
+              <div style={{ opacity: 0.8 }}>
+                {hTone === "day" ? "día" : hTone === "night" ? "noche" : "crepúsculo"}
+              </div>
+            </div>
+
+            {/* Memory active */}
+            <div style={{ marginTop: 12, opacity: 0.9 }}>
+              <div style={{ opacity: 0.8, marginBottom: 6 }}>
+                Memoria activa · {hMem.total}
+              </div>
+              {hMem.items.length === 0 ? (
+                <div style={{ opacity: 0.75 }}>—</div>
+              ) : (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {hMem.items.map((it, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 999,
+                        border: hTone === "night" ? "1px solid rgba(255,255,255,0.25)" : "1px solid rgba(255,255,255,0.35)",
+                        background: hTone === "night" ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.22)",
+                        fontSize: 12
+                      }}
+                      title={`ttl=${it.ttl} · w=${(it.w ?? 0).toFixed(2)}`}
+                    >
+                      {it.type}:{String(it.value).slice(0, 22)}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -514,15 +568,17 @@ export default function Home() {
             marginTop: 18,
             padding: 14,
             borderRadius: 16,
-            border: isH ? hPanelBorder : "1px solid rgba(255,255,255,0.12)",
-            background: isH ? hPanelBg : "rgba(0,0,0,0.25)"
+            border: tab === "hwancko" ? (hTone === "night" ? "1px solid rgba(255,255,255,0.18)" : "1px solid rgba(255,255,255,0.35)") : "1px solid rgba(255,255,255,0.12)",
+            background: tab === "hwancko"
+              ? (hTone === "night" ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.18)")
+              : "rgba(0,0,0,0.25)"
           }}
         >
           {activeChat.length === 0 ? (
-            <div style={{ opacity: isH ? 0.82 : 0.6 }}>
+            <div style={{ opacity: tab === "hwancko" ? 0.82 : 0.6, color: tab === "hwancko" ? hSubFg : undefined }}>
               {tab === "wancko"
-                ? 'Tip: "Recuerda: animal = la cabra"'
-                : "Tip: repite una idea y observa cómo cambia la luz (S) y el tono."}
+                ? 'Tip: di algo natural ("Hoy voy a ir a la playa") y luego pregúntame dónde vas.'
+                : "Tip: pregunta lo mismo varias veces y mira cómo cambia la luz."}
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -534,18 +590,19 @@ export default function Home() {
                     maxWidth: "86%",
                     padding: "10px 12px",
                     borderRadius: 14,
-                    border: isH
-                      ? "1px solid rgba(255,255,255,0.18)"
-                      : "1px solid rgba(255,255,255,0.14)",
+                    border:
+                      tab === "hwancko"
+                        ? (hTone === "night" ? "1px solid rgba(255,255,255,0.18)" : "1px solid rgba(255,255,255,0.35)")
+                        : "1px solid rgba(255,255,255,0.14)",
                     background:
                       m.role === "user"
-                        ? isH
-                          ? hUserBubbleBg
+                        ? tab === "hwancko"
+                          ? (hTone === "night" ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.35)")
                           : "rgba(255,255,255,0.10)"
-                        : isH
-                        ? hAssistantBubbleBg
+                        : tab === "hwancko"
+                        ? (hTone === "night" ? "rgba(0,0,0,0.22)" : "rgba(255,255,255,0.18)")
                         : "rgba(0,0,0,0.22)",
-                    color: mainTextColor,
+                    color: tab === "hwancko" ? hFg : "#eaeaea",
                     whiteSpace: "pre-wrap"
                   }}
                 >
@@ -560,22 +617,20 @@ export default function Home() {
         <div style={{ marginTop: 14 }}>
           <textarea
             value={tab === "wancko" ? wInput : hInput}
-            onChange={(e) =>
-              tab === "wancko" ? setWInput(e.target.value) : setHInput(e.target.value)
-            }
-            placeholder={
-              tab === "wancko"
-                ? 'Escribe aquí… (ej: "Recuerda: ciudad = Barcelona")'
-                : "Escribe aquí…"
-            }
+            onChange={(e) => (tab === "wancko" ? setWInput(e.target.value) : setHInput(e.target.value))}
+            placeholder={tab === "wancko" ? 'Escribe aquí… (ej: "Hoy voy a ir a la playa")' : "Escribe aquí…"}
             rows={4}
             style={{
               width: "100%",
               padding: 14,
               fontSize: 16,
-              background: isH ? "rgba(0,0,0,0.30)" : "rgba(0,0,0,0.35)",
-              color: mainTextColor,
-              border: isH ? "1px solid rgba(255,255,255,0.22)" : "1px solid rgba(255,255,255,0.14)",
+              background: tab === "hwancko"
+                ? (hTone === "night" ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.35)")
+                : "rgba(0,0,0,0.35)",
+              color: tab === "hwancko" ? hFg : "#eaeaea",
+              border: tab === "hwancko"
+                ? (hTone === "night" ? "1px solid rgba(255,255,255,0.22)" : "1px solid rgba(255,255,255,0.45)")
+                : "1px solid rgba(255,255,255,0.14)",
               borderRadius: 12
             }}
             disabled={loading}
@@ -589,9 +644,13 @@ export default function Home() {
               padding: "10px 16px",
               fontSize: 16,
               borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.22)",
-              background: isH ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.08)",
-              color: mainTextColor,
+              border: tab === "hwancko"
+                ? (hTone === "night" ? "1px solid rgba(255,255,255,0.22)" : "1px solid rgba(255,255,255,0.55)")
+                : "1px solid rgba(255,255,255,0.18)",
+              background: tab === "hwancko"
+                ? (hTone === "night" ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.35)")
+                : "rgba(255,255,255,0.08)",
+              color: tab === "hwancko" ? hFg : "#eaeaea",
               cursor: "pointer"
             }}
           >
@@ -599,18 +658,10 @@ export default function Home() {
           </button>
 
           {/* Meta */}
-          <div
-            style={{
-              marginTop: 10,
-              opacity: isH ? 0.85 : 0.5,
-              fontSize: 12,
-              color: mainTextColor
-            }}
-          >
+          <div style={{ marginTop: 10, opacity: tab === "hwancko" ? 0.88 : 0.5, fontSize: 12, color: tab === "hwancko" ? hSubFg : "#eaeaea" }}>
             {tab === "wancko" ? (
               <>
-                Turns: {wSession?.turns ?? 0} · Chain: {wSession?.chain?.length ?? 0} ·
-                Silences: {wSession?.silenceCount ?? 0}
+                Turns: {wSession?.turns ?? 0} · Chain: {wSession?.chain?.length ?? 0} · Silences: {wSession?.silenceCount ?? 0}
               </>
             ) : (
               <>
