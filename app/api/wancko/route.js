@@ -1,78 +1,94 @@
 import { NextResponse } from "next/server";
 
 /** =========================================================
- *  WANCKO API — AU + CSA Memory v0.1
- *  - Memoria implícita: guarda hechos y entidades sin “Recuerda:”
- *  - Coherencia AU: matriz/N/d/W se modulan por conversación (CSA + sesión)
- *  - Anti-loop: break/ground/invert/silence útiles (no “hold” constante)
- *  - ARPI cert: seed/ok/unstable/blocked sin exponer datos
+ *  WANCKO API — AU v0.6 (memoria implícita + idioma fijo + overlays)
+ *  - Memoria implícita (sin "Recuerda:") con KV + conflictos (choice)
+ *  - Lock de idioma por sesión
+ *  - StrategicQuestion NO reemplaza: añade overlay
+ *  - Anti-loop con acciones útiles (none/break/ground/invert/pause/shorten)
+ *  - ARPI cert coherente (seed/ok/unstable/blocked) + hint opcional
  * ========================================================= */
 
-/* ---------------- Utils ---------------- */
-
+/** ---------- helpers ---------- */
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
 
-function norm(s) {
-  return String(s || "").trim();
-}
-
-function normLower(s) {
-  return norm(s).toLowerCase();
-}
-
-function safeLangFromHeader(req) {
-  const h = req.headers.get("accept-language") || "";
-  const l = h.slice(0, 2).toLowerCase();
-  return l === "es" || l === "ca" || l === "en" ? l : "en";
-}
-
-function nowTs() {
+function now() {
   return Date.now();
 }
 
-/* ---------------- AU PARSER (base) ---------------- */
+function norm(str) {
+  return String(str || "").trim();
+}
 
+function normLower(str) {
+  return norm(str).toLowerCase();
+}
+
+function safeObj(x) {
+  return x && typeof x === "object" ? x : {};
+}
+
+function array(x) {
+  return Array.isArray(x) ? x : [];
+}
+
+/** ---------- language lock ---------- */
+function detectLang(text) {
+  const t = normLower(text);
+  if (/[àèéíïòóúüç·l]/.test(t) || /\b(per què|què|això|avui|m'ho)\b/.test(t)) return "ca";
+  if (/[áéíóúñ¿¡]/.test(t) || /\b(qué|por qué|recuerda|olvida|hoy|voy|montaña|playa)\b/.test(t)) return "es";
+  return "en";
+}
+
+function getLangLock(prevSession, req, input) {
+  const s = safeObj(prevSession);
+  const explicit = normLower(input);
+
+  // user explicit request
+  if (/(responde en catal[aà]n|en catal[aà]n)/.test(explicit)) return "ca";
+  if (/(responde en espa[nñ]ol|en espa[nñ]ol|en castellano)/.test(explicit)) return "es";
+  if (/(answer in english|in english|respond in english)/.test(explicit)) return "en";
+
+  if (s.lang_lock) return s.lang_lock;
+
+  // initial lock: use accept-language if present, else detect
+  const header = req.headers.get("accept-language")?.slice(0, 2);
+  const h = header === "es" || header === "ca" || header === "en" ? header : null;
+  return h || detectLang(input);
+}
+
+/** ---------- AU PARSER v0.3.1 (tu base) ---------- */
 function parseAU(input) {
   const text = normLower(input);
 
-  // MODE
-  const mode = /\b(we|they|nosotros|ellos|nosaltres|ells)\b/.test(text) ? "GM" : "GC";
+  const mode = text.includes("we") || text.includes("they") ? "GM" : "GC";
 
-  // SCREEN
-  const screen =
-    /(tired|empty|burnout|agotad|vac[ií]o|cansad|esgotad|buit)/.test(text) ? "DCN" : "RAV";
+  const screen = /(tired|empty|burnout|agotad|vac[ií]o|cansad)/.test(text) ? "DCN" : "RAV";
 
-  // MATRIX (default continuidad)
   let matrix = "3412";
 
-  // 1234 — estructura / norma
-  if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de|he de)/.test(text)) {
+  if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) {
     matrix = "1234";
-  }
-  // 4321 — disolución
-  else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
-    matrix = "4321";
-  }
-  // 2143 — inversión / ontología / duda
-  else if (
+  } else if (
     /(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text) ||
     /\?$/.test(text) ||
-    /(qué es|que es|what is|què és|existencia|existència|existence)/.test(text)
+    /(qué es|que es|what is|què és)/.test(text)
   ) {
     matrix = "2143";
+  } else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) {
+    matrix = "4321";
   }
 
-  // N LEVEL
   let N_level = "N3";
-  if (/(panic|obsessed|ansiedad|obses|pànic|obsess)/.test(text)) N_level = "N1";
-  if (/(harm|force|violence|dañar|forzar|violència|fer mal)/.test(text)) N_level = "N0";
+  if (/(panic|obsessed|ansiedad|obses)/.test(text)) N_level = "N1";
+  if (/(harm|force|violence|dañar|forzar)/.test(text)) N_level = "N0";
 
-  // degradación suave por preguntas cortas repetitivas
-  if (/\?$/.test(text) && text.length < 40 && N_level === "N3") N_level = "N2";
+  if (/\?$/.test(text) && text.length < 40 && N_level === "N3") {
+    N_level = "N2";
+  }
 
-  // INTERVENTION
   let intervention = "Answer";
   if (N_level === "N0" || N_level === "N1") intervention = "Silence";
   else if (text.includes("?")) intervention = "StrategicQuestion";
@@ -82,10 +98,10 @@ function parseAU(input) {
   return { mode, screen, matrix, sense, intervention, N_level };
 }
 
-/* ---------------- Strategic Questions ---------------- */
-
+/** ---------- Strategic Questions (overlay, no reemplazo) ---------- */
 const SQ = {
   en: {
+    // question
     release: "What are you trying to release, exactly?",
     invert: "What flips if you assume the opposite is true for one minute?",
     stop: "What is the smallest thing you can stop feeding today?",
@@ -95,7 +111,18 @@ const SQ = {
     step: "What is the next concrete step that costs the least and proves direction?",
     belief: "What belief are you protecting that might be the cause?",
     trust: "What would you stop doing if you trusted your direction?",
-    decision: "What’s the real decision you are avoiding naming?"
+    decision: "What’s the real decision you are avoiding naming?",
+    // echo (non-interrogative)
+    e_release: "Name what you are releasing—one thing.",
+    e_invert: "Hold the opposite for one minute and watch what changes.",
+    e_stop: "Stop feeding the smallest loop today.",
+    e_rule: "One rule. Followable by everyone.",
+    e_groupAssumption: "One group assumption is carrying the tension.",
+    e_collective: "Make the collective goal clearer than the individual one.",
+    e_step: "One small step that proves direction.",
+    e_belief: "One protected belief may be the cause.",
+    e_trust: "Act as if you trusted your direction.",
+    e_decision: "Name the decision you are not naming."
   },
   es: {
     release: "¿Qué estás intentando soltar exactamente?",
@@ -107,7 +134,17 @@ const SQ = {
     step: "¿Cuál es el siguiente paso concreto que cuesta menos y demuestra dirección?",
     belief: "¿Qué creencia estás protegiendo que podría ser la causa?",
     trust: "¿Qué dejarías de hacer si confiaras en tu dirección?",
-    decision: "¿Qué decisión real estás evitando nombrar?"
+    decision: "¿Qué decisión real estás evitando nombrar?",
+    e_release: "Nombra lo que estás soltando—una sola cosa.",
+    e_invert: "Sostén lo contrario un minuto y mira qué cambia.",
+    e_stop: "Deja de alimentar el bucle más pequeño hoy.",
+    e_rule: "Una regla. Que todos puedan cumplir.",
+    e_groupAssumption: "Hay una suposición del grupo cargando la tensión.",
+    e_collective: "Aclara el objetivo colectivo por encima del individual.",
+    e_step: "Un paso pequeño que pruebe dirección.",
+    e_belief: "Una creencia protegida podría ser la causa.",
+    e_trust: "Actúa como si confiaras en tu dirección.",
+    e_decision: "Nombra la decisión que no estás nombrando."
   },
   ca: {
     release: "Què estàs intentant deixar anar exactament?",
@@ -119,210 +156,48 @@ const SQ = {
     step: "Quin és el següent pas concret que costa menys i demostra direcció?",
     belief: "Quina creença estàs protegint que podria ser la causa?",
     trust: "Què deixaries de fer si confiessis en la teva direcció?",
-    decision: "Quina decisió real estàs evitant anomenar?"
+    decision: "Quina decisió real estàs evitant anomenar?",
+    e_release: "Anomena el que estàs deixant anar—una sola cosa.",
+    e_invert: "Sostén el contrari un minut i mira què canvia.",
+    e_stop: "Deixa d’alimentar el bucle més petit avui.",
+    e_rule: "Una norma. Que tothom pugui seguir.",
+    e_groupAssumption: "Hi ha una suposició del grup carregant la tensió.",
+    e_collective: "Fes més clar l’objectiu col·lectiu que l’individual.",
+    e_step: "Un pas petit que provi direcció.",
+    e_belief: "Una creença protegida podria ser la causa.",
+    e_trust: "Actua com si confiessis en la teva direcció.",
+    e_decision: "Anomena la decisió que no estàs anomenant."
   }
 };
 
-function strategicQuestion(au, lang) {
-  const L = SQ[lang] ? lang : "en";
+function pickSQKey(au) {
   const { mode, screen, matrix } = au;
 
   if (screen === "DCN") {
-    if (matrix === "4321") return SQ[L].release;
-    if (matrix === "2143") return SQ[L].invert;
-    return SQ[L].stop;
+    if (matrix === "4321") return "release";
+    if (matrix === "2143") return "invert";
+    return "stop";
   }
-
   if (mode === "GM") {
-    if (matrix === "1234") return SQ[L].rule;
-    if (matrix === "2143") return SQ[L].groupAssumption;
-    return SQ[L].collective;
+    if (matrix === "1234") return "rule";
+    if (matrix === "2143") return "groupAssumption";
+    return "collective";
   }
-
-  if (matrix === "1234") return SQ[L].step;
-  if (matrix === "2143") return SQ[L].belief;
-  if (matrix === "4321") return SQ[L].trust;
-  return SQ[L].decision;
+  if (matrix === "1234") return "step";
+  if (matrix === "2143") return "belief";
+  if (matrix === "4321") return "trust";
+  return "decision";
 }
 
-/* =========================================================
- *  CSA Memory v0.1 — Campo de Significación AU
- *  - Guarda entidades/planes implícitos
- *  - TTL: se olvida si no reaparece
- *  - Prioriza verdad presente (reciente) pero archiva histórico
- * ========================================================= */
-
-function initCSA() {
-  return {
-    facts: {},      // key -> { value, weight, ttl, lastTurn, source }
-    entities: {},   // type -> { value -> { weight, ttl, lastTurn } }
-    timeline: [],   // { turn, key, w }
-    stats: { turns: 0, drift: 0.18, novelty: 0.25 }
-  };
+function strategicOverlay(au, lang, userAskedQuestion) {
+  const L = SQ[lang] ? lang : "en";
+  const key = pickSQKey(au);
+  const echoKey = `e_${key}`;
+  return userAskedQuestion ? SQ[L][key] : SQ[L][echoKey];
 }
 
-function csaTouchEntity(csa, type, value, turn, w = 0.55, ttl = 6) {
-  if (!value) return;
-  const t = String(type || "misc");
-  const v = String(value).trim();
-  if (!v) return;
-
-  if (!csa.entities[t]) csa.entities[t] = {};
-  const prev = csa.entities[t][v];
-
-  const next = {
-    weight: clamp01((prev?.weight ?? 0.0) * 0.55 + w * 0.65),
-    ttl: Math.max(prev?.ttl ?? 0, ttl),
-    lastTurn: turn
-  };
-  csa.entities[t][v] = next;
-
-  csa.timeline.push({ turn, key: `${t}:${v}`, w: next.weight });
-  csa.timeline = csa.timeline.slice(-48);
-}
-
-function csaTouchFact(csa, key, value, turn, w = 0.6, ttl = 6, source = "implicit") {
-  if (!key) return;
-  const k = String(key).trim();
-  const prev = csa.facts[k];
-
-  csa.facts[k] = {
-    value,
-    weight: clamp01((prev?.weight ?? 0.0) * 0.55 + w * 0.7),
-    ttl: Math.max(prev?.ttl ?? 0, ttl),
-    lastTurn: turn,
-    source: prev?.source || source
-  };
-
-  csa.timeline.push({ turn, key: `fact:${k}`, w: csa.facts[k].weight });
-  csa.timeline = csa.timeline.slice(-48);
-}
-
-function csaDecay(csa) {
-  // TTL decay
-  for (const k of Object.keys(csa.facts || {})) {
-    csa.facts[k].ttl -= 1;
-    if (csa.facts[k].ttl <= 0) delete csa.facts[k];
-  }
-  for (const t of Object.keys(csa.entities || {})) {
-    for (const v of Object.keys(csa.entities[t] || {})) {
-      csa.entities[t][v].ttl -= 1;
-      if (csa.entities[t][v].ttl <= 0) delete csa.entities[t][v];
-    }
-    if (Object.keys(csa.entities[t] || {}).length === 0) delete csa.entities[t];
-  }
-}
-
-function csaTopEntity(csa, type) {
-  const bucket = csa?.entities?.[type];
-  if (!bucket) return null;
-  let best = null;
-  for (const [v, meta] of Object.entries(bucket)) {
-    const score = (meta?.weight ?? 0) + (meta?.ttl ?? 0) * 0.02;
-    if (!best || score > best.score) best = { value: v, score, meta };
-  }
-  return best?.value || null;
-}
-
-function extractImplicitMemory(input, lang) {
-  const text = normLower(input);
-
-  // Very small bootstrap dictionaries
-  const animals = [
-    "cabra","gorila","perro","gato","caballo","vaca","oveja","pollo","pato","conejo",
-    "goat","gorilla","dog","cat","horse","cow","sheep","chicken","duck","rabbit"
-  ];
-
-  // Detect explicit "animal/city" patterns
-  const animalMatch =
-    text.match(/\b(animal)\b.*?\b(es|=|:\s*)\s*([a-záéíóúñç·lüï]+)\b/) ||
-    text.match(/\b(the animal)\b.*?\b(is|=|:\s*)\s*([a-z]+)\b/);
-
-  const cityMatch =
-    text.match(/\b(ciudad)\b.*?\b(es|=|:\s*)\s*([a-záéíóúñç·lüï]+)\b/) ||
-    text.match(/\b(city)\b.*?\b(is|=|:\s*)\s*([a-z]+)\b/);
-
-  const placeImplicit =
-    text.match(/\b(voy a|voy al|voy a la|me voy a|iremos a|iré a|today i'?m going to|i'?m going to)\s+([a-záéíóúñç·lüï]+)\b/);
-
-  // simple “playa” detection as place/plan
-  const beach =
-    /\b(playa|platja|beach)\b/.test(text) ? (/\b(platja)\b/.test(text) ? "platja" : "playa") : null;
-
-  // Emotion / state
-  const mood =
-    text.match(/\b(estoy|em sento|me siento|i am|i'm)\s+(content|feliz|triste|ansioso|agotado|cansado|buit|contenta|content)\b/);
-
-  const found = {
-    animal: null,
-    city: null,
-    place: null,
-    plan: null,
-    mood: null
-  };
-
-  if (animalMatch) found.animal = animalMatch[3] || animalMatch[2];
-  else {
-    // fallback: first mentioned animal token
-    for (const a of animals) {
-      if (text.includes(` ${a} `) || text.endsWith(` ${a}`) || text.startsWith(`${a} `)) {
-        found.animal = a;
-        break;
-      }
-    }
-  }
-
-  if (cityMatch) found.city = cityMatch[3] || cityMatch[2];
-
-  if (placeImplicit) found.place = placeImplicit[2] || null;
-  if (beach) found.place = beach;
-
-  // plan: going-to + place
-  if (placeImplicit || beach) found.plan = found.place ? `go:${found.place}` : "go";
-
-  if (mood) found.mood = mood[2] || mood[1];
-
-  return found;
-}
-
-function isMemoryQuestion(input) {
-  const t = normLower(input);
-  return (
-    /\b(qué|que|what)\b.*\b(animal|ciudad|city|place|lugar)\b/.test(t) ||
-    /\b(dime|tell me)\b.*\b(animal|ciudad|city|place|lugar)\b/.test(t) ||
-    /\b(sabes|do you know)\b.*\b(donde|where)\b/.test(t)
-  );
-}
-
-function answerFromMemory(input, lang, csa) {
-  const t = normLower(input);
-
-  // animal?
-  if (/\b(animal)\b/.test(t)) {
-    const a = csaTopEntity(csa, "animal");
-    if (!a) return lang === "es" ? "No lo tengo registrado aún." : lang === "ca" ? "Encara no ho tinc registrat." : "I don’t have it registered yet.";
-    return lang === "es" ? `Dijiste: ${a}.` : lang === "ca" ? `Has dit: ${a}.` : `You said: ${a}.`;
-  }
-
-  // city?
-  if (/\b(ciudad|city)\b/.test(t)) {
-    const c = csaTopEntity(csa, "city");
-    if (!c) return lang === "es" ? "No lo tengo registrado aún." : lang === "ca" ? "Encara no ho tinc registrat." : "I don’t have it registered yet.";
-    return lang === "es" ? `Dijiste: ${c}.` : lang === "ca" ? `Has dit: ${c}.` : `You said: ${c}.`;
-  }
-
-  // place / where going?
-  if (/\b(donde|where)\b/.test(t) || /\b(lugar|place)\b/.test(t)) {
-    const p = csaTopEntity(csa, "place");
-    if (!p) return lang === "es" ? "No tengo un lugar concreto registrado aún." : lang === "ca" ? "Encara no tinc cap lloc concret registrat." : "I don’t have a concrete place registered yet.";
-    return lang === "es" ? `Has dicho que vas a: ${p}.` : lang === "ca" ? `Has dit que vas a: ${p}.` : `You said you’re going to: ${p}.`;
-  }
-
-  return null;
-}
-
-/* =========================================================
- *  COHERENCIA AU — Juramento como operador
+/** =========================================================
+ *  COHERENCIA AU — Juramento como operador (núcleo)
  * ========================================================= */
 function applyJuramento(matrix, juramento, screen) {
   if (!juramento) return matrix;
@@ -350,11 +225,206 @@ function applyJuramento(matrix, juramento, screen) {
   return matrix;
 }
 
-/* ---------------- Anti-loop ---------------- */
+/** ---------- memory: KV + conflicts + entities ---------- */
+function ensureMemory(prevSession) {
+  const s = safeObj(prevSession);
+  const kv = safeObj(s.kv);
+  const state = safeObj(s.state);
+  const entities = safeObj(state.entities);
+  const conflicts = array(state.conflicts);
 
-function recentRepeatCount(chain, matrix, window = 5) {
-  if (!Array.isArray(chain) || chain.length === 0) return 0;
-  const slice = chain.slice(-window);
+  return {
+    ...s,
+    kv,
+    state: {
+      ...state,
+      entities,
+      conflicts
+    }
+  };
+}
+
+function upsertKV(kv, key, value, scoreBoost = 0.18) {
+  const k = normLower(key).replace(/\s+/g, "_");
+  if (!k) return kv;
+  const v = norm(value);
+  if (!v) return kv;
+
+  const prev = kv[k];
+  const baseScore = prev?.score ?? 0.45;
+  const nextScore = clamp01(baseScore + scoreBoost);
+
+  return {
+    ...kv,
+    [k]: { value: v, score: nextScore, last: now() }
+  };
+}
+
+function extractImplicitMemory(input, lang, mem) {
+  const text = normLower(input);
+  let kv = mem.kv;
+  let entities = mem.state.entities;
+  let conflicts = mem.state.conflicts;
+
+  // explicit "Recuerda:" (still supported)
+  const remember = text.match(/^(recuerda|remember)\s*:\s*(.+)$/i);
+  if (remember) {
+    const payload = remember[2] || "";
+    // forms: "animal = cabra" or "la ciudad es Barcelona"
+    const m1 = payload.match(/^\s*([a-záéíóúñç·l_ ]+)\s*=\s*(.+)\s*$/i);
+    if (m1) {
+      kv = upsertKV(kv, m1[1], m1[2], 0.35);
+      return { kv, entities, conflicts, touched: true };
+    }
+    const m2 = payload.match(/^\s*(el|la)?\s*([a-záéíóúñç·l_ ]+)\s+es\s+(.+)\s*$/i);
+    if (m2) {
+      kv = upsertKV(kv, m2[2], m2[3], 0.35);
+      return { kv, entities, conflicts, touched: true };
+    }
+  }
+
+  // "el animal es X" / "la ciudad es X"
+  const def = text.match(/\b(el|la)\s+([a-záéíóúñç·l_ ]{3,30})\s+(es|era)\s+([a-z0-9áéíóúñç·l' -]{2,60})/i);
+  if (def) {
+    const key = def[2];
+    const val = def[4];
+    kv = upsertKV(kv, key, val, 0.22);
+  }
+
+  // "voy a ir a X" (plans) -> entity + recent topic
+  const go1 = text.match(/\b(voy a ir a|ir[eé]\s+a|me voy a|iré a|i will go to|i'm going to)\s+([a-z0-9áéíóúñç·l' -]{2,60})/i);
+  if (go1) {
+    const place = norm(go1[2]);
+    const id = normLower(place);
+    entities = { ...entities, [id]: { kind: "place", label: place, last: now() } };
+    kv = upsertKV(kv, "plan", place, 0.10);
+  }
+
+  // "entre A y B" or "between A and B" -> conflict choice
+  const betweenES = text.match(/\b(entre)\s+(.+?)\s+(y|o)\s+(.+?)(\?|\.|$)/i);
+  const betweenEN = text.match(/\b(between)\s+(.+?)\s+(and|or)\s+(.+?)(\?|\.|$)/i);
+  const b = betweenES || betweenEN;
+  if (b) {
+    const a = norm(b[2]).slice(0, 60);
+    const c = norm(b[4]).slice(0, 60);
+    if (a && c) {
+      conflicts = [
+        ...conflicts.slice(-19),
+        { type: "choice", a, b: c, last: now(), score: 0.62 }
+      ];
+    }
+  }
+
+  // "playa" / "montaña" implicit choice capture (your example)
+  if ((/\bplaya\b/.test(text) && /\bmonta(ñ|n)a\b/.test(text)) || /\b(beach)\b/.test(text) && /\b(mountain)\b/.test(text)) {
+    conflicts = [
+      ...conflicts.slice(-19),
+      {
+        type: "choice",
+        a: /\bplaya\b/.test(text) ? "playa" : "beach",
+        b: /\bmonta(ñ|n)a\b/.test(text) ? "montaña" : "mountain",
+        last: now(),
+        score: 0.72
+      }
+    ];
+  }
+
+  return { kv, entities, conflicts, touched: true };
+}
+
+function detectRecallIntent(input) {
+  const t = normLower(input);
+  // general
+  if (/(qué dije|que dije|what did i say|recuerdas lo que dije)/.test(t)) return { type: "chat" };
+
+  // animal/city
+  if (/(qué animal|que animal|what animal)/.test(t)) return { type: "kv", key: "animal" };
+  if (/(qué ciudad|que ciudad|what city|which city)/.test(t)) return { type: "kv", key: "ciudad" };
+
+  // choice
+  if (/(entre qu[eé] dos opciones|entre quines dues opcions|between which two options|which two options)/.test(t)) {
+    return { type: "choice" };
+  }
+
+  // list saved
+  if (/(dime.*(animal|ciudad).*(guardad|guardado|saved)|animal y la ciudad)/.test(t)) return { type: "kv_list" };
+
+  return null;
+}
+
+function answerRecall(session, lang, intent) {
+  const s = ensureMemory(session);
+  const kv = s.kv;
+  const conflicts = s.state.conflicts;
+
+  const L = lang || "en";
+
+  if (intent.type === "kv") {
+    // normalize key names (spanish)
+    const k = intent.key;
+    const candidates = [
+      k,
+      k === "ciudad" ? "la_ciudad" : k,
+      k === "animal" ? "el_animal" : k,
+      k === "ciudad" ? "city" : k,
+      k === "animal" ? "animal" : k
+    ].map((x) => normLower(x).replace(/\s+/g, "_"));
+
+    let best = null;
+    for (const c of candidates) {
+      if (kv[c]?.value) {
+        best = kv[c].value;
+        break;
+      }
+    }
+
+    if (!best) {
+      if (L === "es") return "No tengo ese dato guardado en este chat.";
+      if (L === "ca") return "No tinc aquesta dada guardada en aquest xat.";
+      return "I don’t have that saved in this chat.";
+    }
+
+    if (L === "es") return `Dijiste: ${best}.`;
+    if (L === "ca") return `Vas dir: ${best}.`;
+    return `You said: ${best}.`;
+  }
+
+  if (intent.type === "choice") {
+    const last = conflicts.slice(-1)[0];
+    if (!last || last.type !== "choice") {
+      if (L === "es") return "No tengo registrada una disyuntiva clara en este chat.";
+      if (L === "ca") return "No tinc registrada cap disjuntiva clara en aquest xat.";
+      return "I don’t have a clear choice recorded in this chat.";
+    }
+    if (L === "es") return `Te debates entre: ${last.a} y ${last.b}.`;
+    if (L === "ca") return `Et debates entre: ${last.a} i ${last.b}.`;
+    return `You’re choosing between: ${last.a} and ${last.b}.`;
+  }
+
+  if (intent.type === "kv_list") {
+    const animal = kv["animal"]?.value || kv["el_animal"]?.value || kv["animal_guardado"]?.value;
+    const ciudad = kv["ciudad"]?.value || kv["la_ciudad"]?.value || kv["city"]?.value;
+    if (lang === "es") return `El animal guardado es "${animal || "—"}" y la ciudad es "${ciudad || "—"}".`;
+    if (lang === "ca") return `L’animal guardat és "${animal || "—"}" i la ciutat és "${ciudad || "—"}".`;
+    return `Saved animal: "${animal || "—"}", city: "${ciudad || "—"}".`;
+  }
+
+  // chat recall: we keep it minimal to avoid storing full transcript server-side
+  if (intent.type === "chat") {
+    const last = array(s.chain).slice(-1)[0];
+    if (lang === "es") return last ? "Estoy siguiendo el hilo de este chat." : "Aún no hay suficiente contexto en este chat.";
+    if (lang === "ca") return last ? "Segueixo el fil d’aquest xat." : "Encara no hi ha prou context en aquest xat.";
+    return last ? "I’m tracking this chat’s thread." : "Not enough context in this chat yet.";
+  }
+
+  return null;
+}
+
+/** ---------- repeats & anti-loop ---------- */
+function recentRepeatCount(chain, matrix, window = 4) {
+  const c = array(chain);
+  if (!c.length) return 0;
+  const slice = c.slice(-window);
   let n = 0;
   for (let i = slice.length - 1; i >= 0; i--) {
     if (slice[i]?.matrix === matrix) n += 1;
@@ -364,58 +434,48 @@ function recentRepeatCount(chain, matrix, window = 5) {
 }
 
 function antiLoopDecision(prevSession, currentAu) {
-  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
-  const rep = recentRepeatCount(chain, currentAu.matrix, 5);
+  const chain = array(prevSession?.chain);
+  const rep = recentRepeatCount(chain, currentAu.matrix, 4);
 
   const last5 = chain.slice(-5);
-  const n0 = last5.some((x) => x?.N === "N0");
-  const n1 = last5.filter((x) => x?.N === "N1").length;
-  if (n0) return "silence";
-  if (n1 >= 2) return "silence";
+  const hasN0 = last5.some((x) => x?.N === "N0");
+  const n1Count = last5.filter((x) => x?.N === "N1").length;
+  if (hasN0) return { action: "pause", reason: "n0_cluster" };
+  if (n1Count >= 2) return { action: "pause", reason: "n1_cluster" };
 
-  if (rep >= 3) return "break";
+  if (rep >= 3) return { action: "break", reason: "repeat_matrix" };
 
+  // stagnation of d (if we have it)
   const last = chain[chain.length - 1];
-  if (last?.matrix === "2143" && currentAu.matrix === "2143" && rep >= 2) return "ground";
-
-  // stagnation in d (very small movement)
-  if (chain.length >= 3) {
-    const a = chain[chain.length - 1]?.d;
-    const b = chain[chain.length - 3]?.d;
-    if (typeof a === "number" && typeof b === "number" && Math.abs(a - b) < 0.06) {
-      return "invert";
-    }
+  if (last?.matrix === "2143" && currentAu.matrix === "2143" && rep >= 2) {
+    return { action: "ground", reason: "repeat_inversion" };
   }
 
-  return null;
+  return { action: "none", reason: null };
 }
 
-function applyAntiToMatrix(matrix, anti, juramento) {
-  if (!anti) return matrix;
+function applyAntiToMatrix(matrix, antiAction, juramento) {
+  if (!antiAction || antiAction === "none") return matrix;
 
-  if (anti === "break") {
+  if (antiAction === "break") {
     if (matrix === "3412") return "2143";
     if (matrix === "1234") return "3412";
     if (matrix === "2143") return normLower(juramento) === "ansiedad" ? "2143" : "1234";
     if (matrix === "4321") return "3412";
   }
-
-  if (anti === "ground") return "3412";
-  if (anti === "invert") return matrix === "2143" ? "3412" : "2143";
+  if (antiAction === "ground") return "3412";
 
   return matrix;
 }
 
-/* ---------------- Signals (d, tone, W) ---------------- */
-
-function auSignals(au, prevSession, juramento, csa) {
-  // base d per matriz
+/** ---------- signals (d/tone/W) ---------- */
+function auSignals(au, prevSession, juramento) {
   let d =
     au.matrix === "1234" ? 0.20 :
-    au.matrix === "3412" ? 0.46 :
-    au.matrix === "2143" ? 0.60 :
-    au.matrix === "4321" ? 0.82 :
-    0.46;
+    au.matrix === "3412" ? 0.45 :
+    au.matrix === "2143" ? 0.58 :
+    au.matrix === "4321" ? 0.80 :
+    0.45;
 
   if (au.screen === "DCN") d += 0.08;
 
@@ -426,15 +486,8 @@ function auSignals(au, prevSession, juramento, csa) {
   if (j === "soltar") d += 0.12;
   if (j === "límites" || j === "limites") d -= 0.02;
 
-  // CSA influence: drift & novelty move d
-  const drift = typeof csa?.stats?.drift === "number" ? csa.stats.drift : 0.18;
-  const novelty = typeof csa?.stats?.novelty === "number" ? csa.stats.novelty : 0.25;
-  d += (drift - 0.18) * 0.35;
-  d += (novelty - 0.25) * 0.25;
-
-  // repetition tension
-  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
-  const rep = recentRepeatCount(chain, au.matrix, 5);
+  const chain = array(prevSession?.chain);
+  const rep = recentRepeatCount(chain, au.matrix, 4);
   if (rep >= 2 && (au.matrix === "3412" || au.matrix === "2143")) d += 0.06;
   if (rep >= 2 && au.matrix === "1234") d -= 0.03;
 
@@ -444,12 +497,11 @@ function auSignals(au, prevSession, juramento, csa) {
   if (d <= 0.28) tone = "green";
   if (d >= 0.68) tone = "red";
 
-  // W (barra)
   let W =
     au.matrix === "1234" ? 0.30 :
     au.matrix === "3412" ? 0.50 :
-    au.matrix === "2143" ? 0.66 :
-    au.matrix === "4321" ? 0.82 :
+    au.matrix === "2143" ? 0.62 :
+    au.matrix === "4321" ? 0.78 :
     0.50;
 
   if (au.screen === "DCN") W += 0.05;
@@ -457,306 +509,258 @@ function auSignals(au, prevSession, juramento, csa) {
   if (j === "soltar") W += 0.06;
   if (j === "ansiedad") W += 0.02;
 
-  // CSA influence on W: drift pushes to "truth side"
-  W += (drift - 0.18) * 0.35;
   W = clamp01(W);
 
-  return { d, tone, sense: au.sense, W };
-}
-
-/* ---------------- Cycle OK/band (visible in UI) ---------------- */
-
-function updateCycle(prevCycle, au, signals, csa, anti) {
-  const base = prevCycle && typeof prevCycle === "object" ? prevCycle : { band: 1, ok_live: 0.5 };
-
-  // ok movement: + when stable & coherent, - when drift/anti/silence
-  const drift = typeof csa?.stats?.drift === "number" ? csa.stats.drift : 0.18;
-  const novelty = typeof csa?.stats?.novelty === "number" ? csa.stats.novelty : 0.25;
-
-  let ok = typeof base.ok_live === "number" ? base.ok_live : 0.5;
-
-  // stability is good, excess drift penalizes
-  ok += (0.22 - drift) * 0.22;
-  ok += (0.30 - novelty) * 0.10;
-
-  // anti penalties
-  if (anti === "silence") ok -= 0.10;
-  if (anti === "break") ok -= 0.04;
-  if (anti === "invert") ok -= 0.02;
-
-  // N penalties
-  if (au.N_level === "N1") ok -= 0.08;
-  if (au.N_level === "N0") ok -= 0.20;
-
-  // gentle pull toward mid at start
-  ok = ok * 0.92 + 0.5 * 0.08;
+  // ok_live: simple coherence proxy (can be improved later)
+  // higher when stable + not in N1/N0
+  let ok = 0.5;
+  if (au.N_level === "N3") ok += 0.12;
+  if (au.N_level === "N2") ok += 0.04;
+  if (au.N_level === "N1") ok -= 0.18;
+  if (au.N_level === "N0") ok -= 0.30;
+  ok -= Math.abs(d - 0.45) * 0.12; // avoid extremes unless earned
   ok = clamp01(ok);
 
-  // band: 1..4 by d zones (your matrices map)
-  const d = signals.d;
-  let band = 2;
-  if (d < 0.30) band = 1;
-  else if (d < 0.60) band = 2;
-  else if (d < 0.78) band = 3;
-  else band = 4;
-
-  return { band, ok_live: ok };
+  return { d, tone, sense: au.sense, W, ok };
 }
 
-/* ---------------- ARPI cert ---------------- */
-
+/** ---------- ARPI cert ---------- */
 function arpiCert(nextSessionObj) {
   const turns = nextSessionObj?.turns || 0;
-  const chain = Array.isArray(nextSessionObj?.chain) ? nextSessionObj.chain : [];
+  const chain = array(nextSessionObj?.chain);
   const last5 = chain.slice(-5);
 
   const hasN0 = last5.some((x) => x?.N === "N0");
   const hasN1 = last5.some((x) => x?.N === "N1");
 
   if (turns < 2) return { level: "seed" };
-  if (hasN0) return { level: "blocked" };
-  if (hasN1) return { level: "unstable" };
+  if (hasN0) return { level: "blocked", hint: "pausa requerida" };
+  if (hasN1) return { level: "unstable", hint: "tensión reciente" };
   return { level: "ok" };
 }
 
-/* ---------------- Session ---------------- */
-
-function nextSession(prev, au, signals, anti, csa, cycle) {
-  const base = prev && typeof prev === "object" ? prev : {};
-  const chain = Array.isArray(base.chain) ? base.chain : [];
+/** ---------- session update ---------- */
+function nextSession(prev, au, signals, juramento, anti) {
+  const base = ensureMemory(prev);
+  const chain = array(base.chain);
 
   const next = {
     v: 2,
+    lang_lock: base.lang_lock || null,
     turns: (base.turns || 0) + 1,
     silenceCount: base.silenceCount || 0,
     answerCount: base.answerCount || 0,
+
+    // memory
+    kv: base.kv,
+    state: base.state,
+
+    // last AU snapshot
     last: { ...au, signals, anti },
-    csa,
-    cycle,
+
+    // chain (debug)
     chain: [
       ...chain.slice(-29),
       {
-        t: nowTs(),
+        t: now(),
         matrix: au.matrix,
         sense: au.sense,
         N: au.N_level,
         d: signals.d,
         W: signals.W,
+        ok: signals.ok,
         intent: au.intervention,
-        anti: anti || null
+        anti: anti?.action || "none"
       }
     ]
   };
 
+  // cycle helper (for UI even before first au)
+  next.cycle = {
+    band: Math.max(1, Math.min(4, 1 + (au.matrix === "1234" ? 0 : au.matrix === "3412" ? 1 : au.matrix === "2143" ? 2 : 3))),
+    ok_live: signals.ok
+  };
+
+  // persist juramento as profile marker (optional)
+  if (juramento) next.juramento = juramento;
+
   return next;
 }
 
-/* ---------------- OpenAI (Wancko) ---------------- */
-
-async function wanckoLLM({ input, lang, au, signals, juramento, memoryHints }) {
-  const system = "You are Wancko’s language engine. Closed interventions. No therapy. No advice. No reassurance.";
-  const prompt = `
-AU_MODE: ${au.mode}
-AU_SCREEN: ${au.screen}
-AU_MATRIX: ${au.matrix}
-AU_SENSE: ${au.sense}
-AU_N: ${au.N_level}
-GRADIENT_D: ${signals.d.toFixed(2)}
-W: ${signals.W.toFixed(2)}
-JURAMENTO: ${juramento || "none"}
-
-MEMORY_HINTS (use only if relevant, do not invent):
-${memoryHints}
-
-RULES:
-- No advice
-- No reassurance
-- No follow-up invitation
-- One short intervention
-- 35–85 words
-- Match language: ${lang}
-
-USER:
-${input}
-`;
-
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.45
-    })
-  });
-
-  if (!res.ok) return "—";
-  const data = await res.json();
-  return data?.choices?.[0]?.message?.content?.trim() || "—";
-}
-
-/* ---------------- API ---------------- */
-
+/** ---------- API ---------- */
 export async function POST(req) {
   try {
     const body = await req.json();
-    const input = body?.input;
-    const session = body?.session || null;
+    const input = norm(body?.input);
+    const sessionIn = body?.session || null;
     const juramento = body?.juramento || null;
 
-    if (!input || norm(input).length < 2) {
-      return NextResponse.json({
-        output: null,
-        au: null,
-        session,
-        cert: { level: "seed" }
-      });
+    // build memory-safe session object
+    let session = ensureMemory(sessionIn);
+
+    // language lock
+    const lang = getLangLock(session, req, input);
+    session.lang_lock = lang;
+
+    if (!input || input.length < 2) {
+      // keep cert seed but allow UI to show neutral cycle
+      const seedSession = {
+        ...session,
+        turns: session.turns || 0,
+        cycle: session.cycle || { band: 1, ok_live: 0.5 }
+      };
+      return NextResponse.json({ output: null, au: null, session: seedSession, cert: { level: "seed" } });
     }
 
-    const lang = safeLangFromHeader(req);
+    // 0) implicit memory extraction BEFORE AU decisions (so it influences cert later)
+    const memUpd = extractImplicitMemory(input, lang, session);
+    session.kv = memUpd.kv;
+    session.state.entities = memUpd.entities;
+    session.state.conflicts = memUpd.conflicts;
 
-    // ----- CSA update -----
-    const prevCSA = session?.csa && typeof session.csa === "object" ? session.csa : initCSA();
-    const turn = (session?.turns || 0) + 1;
-
-    // decay first (so re-mentions re-activate)
-    const csa = JSON.parse(JSON.stringify(prevCSA));
-    csaDecay(csa);
-    csa.stats.turns = turn;
-
-    // extract implicit memory
-    const found = extractImplicitMemory(input, lang);
-
-    if (found.animal) csaTouchEntity(csa, "animal", found.animal, turn, 0.82, 12);
-    if (found.city) csaTouchEntity(csa, "city", found.city, turn, 0.78, 10);
-    if (found.place) csaTouchEntity(csa, "place", found.place, turn, 0.62, 7);
-    if (found.plan) csaTouchFact(csa, "plan:last", found.plan, turn, 0.55, 6, "implicit");
-    if (found.mood) csaTouchEntity(csa, "mood", found.mood, turn, 0.55, 5);
-
-    // update drift/novelty cheaply (Zipf-lite heuristic)
-    // drift rises when many new keys appear
-    const recent = Array.isArray(csa.timeline) ? csa.timeline.slice(-10) : [];
-    const uniq = new Set(recent.map((x) => x.key));
-    const novelty = clamp01(uniq.size / 10);
-    const drift = clamp01((novelty * 0.55) + 0.15);
-    csa.stats.novelty = novelty;
-    csa.stats.drift = drift;
-
-    // ----- AU base parse -----
+    // 1) parse base
     let au = parseAU(input);
 
-    // Memory questions should not be derailed into generic strategic questions
-    const memQ = isMemoryQuestion(input);
-    if (memQ && au.intervention === "StrategicQuestion") au.intervention = "Answer";
-
-    // Juramento coherence
+    // 2) juramento operator
     au.matrix = applyJuramento(au.matrix, juramento, au.screen);
     au.sense = au.matrix === "2143" ? "inverse" : "direct";
 
-    // Anti-loop decision
+    // 3) anti-loop decision
     const anti = antiLoopDecision(session, au);
 
-    // Anti can adjust matrix
-    au.matrix = applyAntiToMatrix(au.matrix, anti, juramento);
+    // 4) anti-loop may adjust matrix (controlled)
+    au.matrix = applyAntiToMatrix(au.matrix, anti.action, juramento);
     au.sense = au.matrix === "2143" ? "inverse" : "direct";
 
-    // Signals now depend on CSA+session
-    const signals = auSignals(au, session, juramento, csa);
+    // 5) signals
+    const signals = auSignals(au, session, juramento);
 
-    // Cycle
-    const cycle = updateCycle(session?.cycle, au, signals, csa, anti);
-
-    // New session
-    let newSession = nextSession(session, au, signals, anti, csa, cycle);
-
-    // Cert
+    // 6) new session
+    let newSession = nextSession(session, au, signals, juramento, anti);
     const cert = arpiCert(newSession);
 
-    // Effective silence
-    const effectiveSilence = au.intervention === "Silence" || anti === "silence";
+    // 7) recall intent (must override strategic)
+    const recall = detectRecallIntent(input);
+    if (recall) {
+      const recallOut = answerRecall(newSession, lang, recall);
+      newSession.answerCount += 1;
+      return NextResponse.json({
+        output: recallOut || (lang === "es" ? "No tengo ese dato guardado en este chat." : lang === "ca" ? "No tinc aquesta dada guardada en aquest xat." : "I don’t have that saved in this chat."),
+        au: { ...au, signals, anti },
+        session: newSession,
+        cert
+      });
+    }
+
+    // 8) effective silence (security / anti pause)
+    const effectiveSilence = au.intervention === "Silence" || anti.action === "pause";
     if (effectiveSilence) {
       newSession.silenceCount += 1;
       return NextResponse.json({
         output: "—",
-        au: { ...au, signals: { ...signals, anti }, anti },
+        au: { ...au, signals, anti },
         session: newSession,
         cert
       });
     }
 
-    // Memory answer path (fast, coherent)
-    if (memQ) {
-      const mAns = answerFromMemory(input, lang, csa);
-      if (mAns) {
-        newSession.answerCount += 1;
-        return NextResponse.json({
-          output: mAns,
-          au: { ...au, signals: { ...signals, anti }, anti },
-          session: newSession,
-          cert
-        });
-      }
-      // if asked but nothing found => keep AU but answer plainly
-      const none = lang === "es"
-        ? "No tengo ese dato registrado todavía en esta conversación."
-        : lang === "ca"
-        ? "Encara no tinc aquesta dada registrada en aquesta conversa."
-        : "I don’t have that registered yet in this conversation.";
+    // 9) strategic overlay (no reemplaza)
+    const userAskedQuestion = input.includes("?");
+    const overlay = au.intervention === "StrategicQuestion"
+      ? strategicOverlay(au, lang, userAskedQuestion)
+      : null;
+
+    // 10) LLM answer (Wancko)
+    const memoryFacts = (() => {
+      const kv = safeObj(newSession.kv);
+      const keys = Object.keys(kv).slice(0, 12);
+      const items = keys
+        .map((k) => `${k}=${kv[k]?.value}`)
+        .filter(Boolean)
+        .slice(-10);
+      const lastChoice = array(newSession.state.conflicts).slice(-1)[0];
+      const choiceLine = lastChoice?.type === "choice" ? `choice:${lastChoice.a}|${lastChoice.b}` : "";
+      return [items.join("; "), choiceLine].filter(Boolean).join(" · ");
+    })();
+
+    const prompt = `
+LANG_LOCK: ${lang}
+MODE: ${au.mode}
+SCREEN: ${au.screen}
+MATRIX: ${au.matrix}
+SENSE: ${au.sense}
+JURAMENTO: ${juramento || "none"}
+GRADIENT_D: ${signals.d.toFixed(2)}
+W: ${signals.W.toFixed(2)}
+OK_LIVE: ${signals.ok.toFixed(2)}
+ANTI: ${anti.action || "none"}
+
+MEMORY (this chat only; may be incomplete):
+${memoryFacts || "—"}
+
+RULES:
+- Keep it human, not robotic.
+- Use the memory above when relevant. If not present, don't invent.
+- Do not claim long-term memory beyond this chat/session.
+- No therapy. No diagnosis. No reassurance.
+- Avoid generic filler.
+- 1 short response (max 85 words).
+- Write in ${lang} unless user clearly used another language.
+- If user message is a plan ("I'll go to..."), reflect it and keep continuity.
+- If user asked a direct question, answer directly before anything else.
+
+USER:
+${input}
+
+TASK:
+Write one concise, context-aware intervention.
+${overlay ? `Then add a final line labeled "AU:" with: ${overlay}` : ""}
+`.trim();
+
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You are Wancko: AU-aligned conversation engine. Keep continuity within this chat." },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.45
+      })
+    });
+
+    if (!res.ok) {
       newSession.answerCount += 1;
       return NextResponse.json({
-        output: none,
-        au: { ...au, signals: { ...signals, anti }, anti },
+        output: overlay ? (lang === "es" ? `—\nAU: ${overlay}` : lang === "ca" ? `—\nAU: ${overlay}` : `—\nAU: ${overlay}`) : "—",
+        au: { ...au, signals, anti },
         session: newSession,
         cert
       });
     }
 
-    // Strategic Question
-    if (au.intervention === "StrategicQuestion") {
-      let q = strategicQuestion(au, lang);
-      if (anti === "break") q = q.split("\n")[0];
-      newSession.answerCount += 1;
-      return NextResponse.json({
-        output: q,
-        au: { ...au, signals: { ...signals, anti }, anti },
-        session: newSession,
-        cert
-      });
+    const data = await res.json();
+    let out = data?.choices?.[0]?.message?.content?.trim() || "—";
+
+    // anti: shorten if it rambles
+    if (anti.action === "break" && out.length > 220) {
+      out = out.split("\n")[0];
+      if (out.includes(".")) out = out.split(".")[0] + ".";
     }
-
-    // LLM Answer
-    const memoryHints = [
-      `animal=${csaTopEntity(csa, "animal") || "—"}`,
-      `city=${csaTopEntity(csa, "city") || "—"}`,
-      `place=${csaTopEntity(csa, "place") || "—"}`,
-      `mood=${csaTopEntity(csa, "mood") || "—"}`
-    ].join("\n");
-
-    let out = await wanckoLLM({ input, lang, au, signals, juramento, memoryHints });
-
-    // anti-break: shorten
-    if (anti === "break" && out.includes(".")) out = out.split(".")[0] + ".";
 
     newSession.answerCount += 1;
 
     return NextResponse.json({
       output: out,
-      au: { ...au, signals: { ...signals, anti }, anti },
+      au: { ...au, signals, anti },
       session: newSession,
       cert
     });
   } catch {
-    return NextResponse.json({
-      output: "—",
-      au: null,
-      session: null,
-      cert: { level: "seed" }
-    });
+    return NextResponse.json({ output: "—", au: null, session: null, cert: { level: "seed" } });
   }
 }
