@@ -1,278 +1,265 @@
 import { NextResponse } from "next/server";
+import type { AUHashState, Lang } from "@/lib/auhash/kernel";
+import { ingestText, ensureState, queryMemory } from "@/lib/auhash/minimal";
 
 /** =========================================================
- * H-WANCKO — AU Mirror v0.5
- * - Voz humana por arquetipo (no frases fijas)
- * - AU espejo: el recorrido subjetivo→objetivo (complementario a Wancko)
- * - "Luz" d (day/violet/night) + barra propia (ok/band)
- * - Memoria propia (separada) + idioma estable
- * - Sin terapia. Sin consejo. Sin seguimiento.
+ * H-WANCKO API — AU v0.7 (TS)
+ * - Voz humana por arquetipo (no frases hardcoded repetidas)
+ * - Memoria propia (separada de Wancko)
+ * - Espejo: subjetivo → objetivo (complementario)
+ * - Luz: day → violet → night (d = luz)
  * ========================================================= */
 
-const clamp01 = (x) => Math.max(0, Math.min(1, x));
-const now = () => Date.now();
+type Archetype = "estoic" | "mystic" | "warrior" | "poet";
 
-function norm(s) {
-  return String(s || "").trim().replace(/\s+/g, " ");
-}
-function lc(s) {
-  return String(s || "").toLowerCase();
-}
+type AUCore = {
+  screen: "RAV" | "DCN";
+  matrix: "1234" | "2143" | "3412" | "4321";
+  N_level: "N0" | "N1" | "N2" | "N3";
+};
 
-/* ---------- language stable ---------- */
-function detectLangStrong(text) {
-  const t = lc(text);
-  const caStrong =
-    /[àèéíïòóúüç·l]/.test(t) ||
-    /\b(què|per què|això|aquesta|aquest|m'|em|\bon\b|\bdel\b|\bels\b|\bles\b)\b/.test(t);
-  const esStrong =
-    /[áéíóúñ¿¡]/.test(t) ||
-    /\b(qué|por qué|ciudad|animal|playa|montaña|hoy|mañana)\b/.test(t);
-  if (caStrong && !esStrong) return "ca";
-  if (esStrong && !caStrong) return "es";
-  return null;
-}
+type Signals = {
+  d: number; // luz (0..1) en H-Wancko
+  tone: "day" | "violet" | "night";
+  ok: number;
+  band: 0 | 1 | 2;
+  complexity: number;
+  beauty: number;
+};
 
-function initMemory(base) {
-  const mem = base?.memory && typeof base.memory === "object" ? base.memory : {};
-  return {
-    facts: mem.facts && typeof mem.facts === "object" ? mem.facts : {},
-    topics: mem.topics && typeof mem.topics === "object" ? mem.topics : {},
-    langVotes: mem.langVotes && typeof mem.langVotes === "object" ? mem.langVotes : { es: 0, ca: 0, en: 0 }
-  };
-}
-function bumpTopic(memory, key, w = 1, t = now()) {
-  const cur = memory.topics[key] || { t, w: 0 };
-  memory.topics[key] = { t, w: Math.min(9, (cur.w || 0) + w) };
-}
-function setFact(memory, key, v, w = 2, t = now()) {
-  memory.facts[key] = { v, t, w: Math.min(9, w) };
+type Session = {
+  v: 2;
+  turns: number;
+  lang: Lang;
+  memory: AUHashState;
+  chain: Array<{ t: number; matrix: AUCore["matrix"]; N: AUCore["N_level"]; d: number; ok: number }>;
+  last?: { au: AUCore; signals: Signals; archetype: Archetype };
+};
+
+function clamp01(x: number) {
+  return Math.max(0, Math.min(1, x));
 }
 
-function updateLang(memory, session, input, accept) {
-  const d = detectLangStrong(input);
-  if (d) memory.langVotes[d] = (memory.langVotes[d] || 0) + 1;
+function detectLangStable(input: string, prevLang?: Lang): Lang {
+  const t = (input || "").toLowerCase();
+  const looksCA = /[àèéíïòóúüç·l]/.test(t) || /\b(per què|avui|això|saps|quina|quin)\b/.test(t);
+  const looksES = /[áéíóúñ¿¡]/.test(t) || /\b(hoy|donde|dónde|qué|por qué|recuerda|sabes)\b/.test(t);
 
-  const entries = Object.entries(memory.langVotes).sort((a, b) => b[1] - a[1]);
-  const best = entries[0];
-  const second = entries[1] || ["", 0];
-  const current = session?.lang || accept || "es";
-  if (best && best[0] && best[1] >= second[1] + 2) return best[0];
-  return current;
+  if (!prevLang) return looksCA ? "ca" : looksES ? "es" : "en";
+  if (prevLang === "ca" && looksES && !looksCA) return "es";
+  if (prevLang === "es" && looksCA && !looksES) return "ca";
+  return prevLang;
 }
 
-/* ---------- AU parse (shared-ish) ---------- */
-function parseAUBase(input) {
-  const text = lc(input).trim();
+function parseAU(input: string): AUCore {
+  const text = (input || "").toLowerCase().trim();
+  const screen: AUCore["screen"] = /(tired|empty|burnout|agotad|vac[ií]o|cansad)/.test(text) ? "DCN" : "RAV";
 
-  const mode = /\b(we|they|nosotros|ellos|nosaltres|ells)\b/.test(text) ? "GM" : "GC";
-  const screen = /(tired|empty|burnout|agotad|vac[ií]o|cansad|fatig|esgotad)/.test(text) ? "DCN" : "RAV";
-
-  let matrix = "3412";
+  let matrix: AUCore["matrix"] = "3412";
   if (/(should|must|have to|need to|debo|tengo que|cal|hauria|he de)/.test(text)) matrix = "1234";
-  else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) matrix = "4321";
   else if (
     /(why|doubt|uncertain|confused|por qué|dudo|no entiendo|per què|dubto)/.test(text) ||
     /\?$/.test(text) ||
-    /(qué es|que es|what is|què és|qu[eè] passa si)/.test(text)
+    /(qué es|que es|what is|què és)/.test(text)
   ) matrix = "2143";
+  else if (/(let go|stop|quit|release|enough|dejar|parar|soltar|basta|deixar|aturar|prou)/.test(text)) matrix = "4321";
 
-  let N_level = "N3";
-  if (/(panic|obsessed|ansiedad|obses|pànic|obsession)/.test(text)) N_level = "N1";
-  if (/(harm|force|violence|dañar|forzar|fer mal|violència)/.test(text)) N_level = "N0";
+  let N_level: AUCore["N_level"] = "N3";
+  if (/(panic|obsessed|ansiedad|obses)/.test(text)) N_level = "N1";
+  if (/(harm|force|violence|dañar|forzar)/.test(text)) N_level = "N0";
+  if (/\?$/.test(text) && text.length < 40 && N_level === "N3") N_level = "N2";
 
-  let intervention = "Answer";
-  if (N_level === "N0" || N_level === "N1") intervention = "Silence";
-  else if (text.includes("?")) intervention = "StrategicQuestion";
-
-  const sense = matrix === "2143" ? "inverse" : "direct";
-
-  return { mode, screen, matrix, sense, intervention, N_level };
+  return { screen, matrix, N_level };
 }
 
-/* ---------- mirror mapping (subjective→objective) ----------
-   H-Wancko interpreta las matrices como espejo:
-   - Wancko: 1234 = estructura (verde) ... 4321 = disolución (rojo)
-   - H:      4321 es "revelación" (más luz) si está bien integrada
-   Para el "luz d" usamos:
-   1234 -> violeta medio (forma)
-   3412 -> violeta estable
-   2143 -> noche si se estanca (duda sin mito)
-   4321 -> día si se integra (desprendimiento con claridad)
-*/
-function computeSignalsMirror(au, prevSession, memory) {
-  const chain = Array.isArray(prevSession?.chain) ? prevSession.chain : [];
-  const rep = chain.slice(-6).filter((x) => x?.matrix === au.matrix).length;
-
-  // base light d
-  let d =
-    au.matrix === "4321" ? 0.72 :
-    au.matrix === "3412" ? 0.55 :
-    au.matrix === "1234" ? 0.52 :
-    au.matrix === "2143" ? 0.42 :
-    0.55;
-
-  if (au.screen === "DCN") d -= 0.06; // en H, DCN oscurece (fatiga)
-  if (rep >= 2 && au.matrix === "2143") d -= 0.08; // duda repetida -> noche
-  if (rep >= 2 && au.matrix === "4321") d += 0.05; // soltar repetido -> más luz
-
-  // topic richness: more "myth load" -> violet (not night)
-  const topicMass = Object.values(memory?.topics || {}).reduce((a, x) => a + (x?.w || 0), 0);
-  if (topicMass > 8) d += 0.03;
-
-  d = clamp01(d);
-
-  let tone = "violet";
-  if (d >= 0.70) tone = "day";
-  if (d <= 0.35) tone = "night";
-
-  // ok mirror: wants mid early, then follows coherence
-  const turns = (prevSession?.turns || 0) + 1;
-  const coherence = 1 - Math.abs(d - 0.55);
-  const ok = clamp01(0.18 + 0.62 * coherence - Math.min(0.18, rep * 0.05));
-  let band = 1;
-  if (ok > 0.75) band = 0;
-  else if (ok > 0.62) band = 1;
-  else if (ok > 0.48) band = 2;
-  else band = 3;
-
-  // complexity/beauty
-  const complexity = clamp01(Math.log2(2 + turns) / 6);
-  const beauty = clamp01(Math.log(1 + (ok * 4 + (1 - rep * 0.12))) / Math.log(6));
-
-  return { d, tone, ok, band, complexity, beauty, sense: au.sense };
+// espejo: en H-Wancko invertimos “tendencia” de matriz hacia objetividad
+function mirrorMatrix(m: AUCore["matrix"]): AUCore["matrix"] {
+  // espejo simple (no rígido): 1234 ↔ 4321, 2143 ↔ 3412
+  if (m === "1234") return "4321";
+  if (m === "4321") return "1234";
+  if (m === "2143") return "3412";
+  return "2143";
 }
 
-/* ---------- arquetipos (voz real) ---------- */
-const ARCHETYPES = {
-  estoic: {
-    label: "Estoic",
-    style: "plain, firm, minimal, honest. No ornament."
-  },
-  mystic: {
-    label: "Mystic",
-    style: "symbolic, threshold language, violet imagery, gentle but precise."
-  },
-  warrior: {
-    label: "Warrior",
-    style: "direct, decisive, embodied, action clarity. No bravado."
-  },
-  poet: {
-    label: "Poet",
-    style: "human, vivid, attentive to what is unsaid; concise."
-  }
-};
+function initSession(prev: any, lang: Lang): Session {
+  const base: Session =
+    prev && prev.v === 2
+      ? prev
+      : { v: 2, turns: 0, lang, memory: ensureState(null, lang), chain: [] };
 
-/* ---------- session update ---------- */
-function nextSession(prev, au, signals, memory, lang, archetype) {
-  const base = prev && typeof prev === "object" ? prev : {};
-  const chain = Array.isArray(base.chain) ? base.chain : [];
+  const fixedLang = detectLangStable("", base.lang || lang);
   return {
-    v: 2,
-    turns: (base.turns || 0) + 1,
-    lang: lang || base.lang || "es",
-    archetype,
-    memory,
-    last: { ...au, signals },
-    chain: [
-      ...chain.slice(-49),
-      {
-        t: now(),
-        matrix: au.matrix,
-        N: au.N_level,
-        d: signals.d,
-        ok: signals.ok,
-        band: signals.band,
-        intent: au.intervention
-      }
-    ]
+    ...base,
+    lang: fixedLang,
+    memory: ensureState(base.memory, fixedLang),
+    chain: Array.isArray(base.chain) ? base.chain : []
   };
 }
 
-/* ---------- MAIN API ---------- */
-export async function POST(req) {
+function computeSignals(au: AUCore, session: Session): Signals {
+  const feat = session.memory?.features || { entropy: 0.15, beauty: 0.15, tension: 0.10 };
+
+  // d aquí es “luz”: más belleza = más luz, más tensión = más noche
+  let d = 0.55;
+  d += (feat.beauty - 0.15) * 0.65;
+  d -= (feat.tension - 0.10) * 0.70;
+
+  // espejo por matriz: 1234 (espejado) tiende a bajar luz; 4321 sube luz (revelación objetiva)
+  const m = mirrorMatrix(au.matrix);
+  if (m === "1234") d -= 0.06;
+  if (m === "4321") d += 0.06;
+  if (au.screen === "DCN") d -= 0.05;
+
+  d = clamp01(d);
+
+  let tone: Signals["tone"] = "violet";
+  if (d >= 0.68) tone = "day";
+  if (d <= 0.35) tone = "night";
+
+  // ok: intermedio al principio, deriva con belleza/tensión
+  let ok = 0.50 + (feat.beauty - 0.15) * 0.55 - (feat.tension - 0.10) * 0.60;
+  ok = clamp01(ok);
+
+  const band: Signals["band"] = ok < 0.38 ? 0 : ok > 0.62 ? 2 : 1;
+
+  return {
+    d,
+    tone,
+    ok,
+    band,
+    complexity: clamp01(feat.entropy),
+    beauty: clamp01(feat.beauty)
+  };
+}
+
+function archetypeSystem(archetype: Archetype, L: Lang) {
+  // Diferencia fuerte (para que NO parezcan máquinas)
+  // Sin meter “epopeya”, pero sí “sujeto humano”.
+  const base = {
+    estoic: {
+      system: L === "ca"
+        ? "Ets un estoic. Parles curt, sobri, amb respecte. Fas un diagnòstic operatiu i una pregunta neta."
+        : L === "en"
+        ? "You are a stoic. Speak short, sober, respectful. Make an operational diagnosis and one clean question."
+        : "Eres un estoico. Hablas corto, sobrio, con respeto. Haces un diagnóstico operativo y una pregunta limpia."
+    },
+    mystic: {
+      system: L === "ca"
+        ? "Ets un místic. Parles amb imatge, però concret. Converteixes confusió en mapa. Una pregunta que obre llindar."
+        : L === "en"
+        ? "You are a mystic. Speak with imagery but stay concrete. Turn confusion into a map. Ask one threshold question."
+        : "Eres un místico. Hablas con imagen pero concreto. Conviertes confusión en mapa. Una pregunta que abre umbral."
+    },
+    warrior: {
+      system: L === "ca"
+        ? "Ets un guerrer. Parles directe, amb energia. Tall al soroll, defineix acció/criteri. Una pregunta d'elecció."
+        : L === "en"
+        ? "You are a warrior. Speak direct, energetic. Cut the noise, define action/criterion. Ask one choice question."
+        : "Eres un guerrero. Hablas directo, con energía. Cortas ruido, defines acción/criterio. Una pregunta de elección."
+    },
+    poet: {
+      system: L === "ca"
+        ? "Ets un poeta. Parles humà, sensorial, sense grandiloqüència. Il·lumines una veritat amb delicadesa. Una pregunta final."
+        : L === "en"
+        ? "You are a poet. Speak human, sensory, without grandiosity. Illuminate one truth gently. One final question."
+        : "Eres un poeta. Hablas humano, sensorial, sin grandilocuencia. Iluminas una verdad con delicadeza. Una pregunta final."
+    }
+  } as const;
+
+  return base[archetype];
+}
+
+export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const inputRaw = body?.input;
-    const session = body?.session || null;
-    const archetypeRaw = body?.archetype || "estoic";
+    const input = String(body?.input || "");
+    const archetype: Archetype = (body?.archetype as Archetype) || "estoic";
+    const prevSession = body?.session ?? null;
 
-    const input = norm(inputRaw);
-    if (!input || input.length < 2) return NextResponse.json({ output: null, au: null, session });
+    if (!input || input.trim().length < 2) {
+      return NextResponse.json({ output: null, au: null, session: prevSession });
+    }
 
-    const accept = req.headers.get("accept-language")?.slice(0, 2) || "es";
-    const base = session && typeof session === "object" ? session : {};
-    const memory = initMemory(base);
+    const initialLang = detectLangStable(input, prevSession?.lang);
+    const session0 = initSession(prevSession, initialLang);
+    const L = detectLangStable(input, session0.lang);
 
-    // update language stable
-    const lang = updateLang(memory, base, input, accept);
+    // AU + memoria
+    const au0 = parseAU(input);
+    const ing = ingestText(session0.memory, input, "user", L);
+    const memory1: AUHashState = { ...ing.state, lang: L };
 
-    // AU parse
-    let au = parseAUBase(input);
+    const session1: Session = {
+      ...session0,
+      turns: (session0.turns || 0) + 1,
+      lang: L,
+      memory: memory1
+    };
 
-    // minimal facts/topics (shared)
-    const t = lc(input);
-    if (/\b(playa|platja|beach)\b/.test(t)) bumpTopic(memory, "GL_LUGAR_DESCANSO", 1.0);
-    if (/\b(monta[nñ]a|muntanya|mountain)\b/.test(t)) bumpTopic(memory, "GL_LUGAR_ELEVACION", 1.0);
+    const signals = computeSignals(au0, session1);
 
-    const animalMatch = input.match(/(?:recuerda:\s*)?(?:el\s*)?animal\s*(?:es|=|:)\s*([A-Za-zÀ-ÿ0-9 _-]{2,40})/i);
-    if (animalMatch) setFact(memory, "animal", norm(animalMatch[1]).replace(/[.?!]+$/g, ""), 2.0);
+    const chain = Array.isArray(session1.chain) ? session1.chain : [];
+    const newChain = [
+      ...chain.slice(-24),
+      { t: Date.now(), matrix: au0.matrix, N: au0.N_level, d: signals.d, ok: signals.ok }
+    ];
 
-    const cityMatch =
-      input.match(/(?:recuerda:\s*)?(?:la\s*)?ciudad\s*(?:es|=|:)\s*([A-Za-zÀ-ÿ0-9 _-]{2,40})/i) ||
-      input.match(/(?:la\s*)?ciutat\s*(?:[eé]s|=|:)\s*([A-Za-zÀ-ÿ0-9 _-]{2,40})/i);
-    if (cityMatch) setFact(memory, "city", norm(cityMatch[1]).replace(/[.?!]+$/g, ""), 2.0);
+    const session2: Session = {
+      ...session1,
+      chain: newChain,
+      last: { au: au0, signals, archetype }
+    };
 
-    // signals mirror
-    const signals = computeSignalsMirror(au, base, memory);
-
-    // session
-    const key = ARCHETYPES[archetypeRaw] ? archetypeRaw : "estoic";
-    const next = nextSession(base, au, signals, memory, lang, key);
-
-    // SILENCE if N0/N1
-    if (au.intervention === "Silence") {
+    // seguridad N0/N1
+    if (au0.N_level === "N0" || au0.N_level === "N1") {
       return NextResponse.json({
         output: "—",
-        au: { ...au, signals },
-        session: next,
-        meta: { archetype: key, historical: true }
+        au: { ...au0, signals },
+        session: session2
       });
     }
 
-    // Use OpenAI for true human voice by archetype + mirror AU
-    const arch = ARCHETYPES[key];
+    // memoria: responder “qué dije/dónde” si hay hit compatible
+    const q = queryMemory(memory1, input);
+    const hasHit = q?.hit && q.hit.confidence >= 0.48;
 
-    const system = `
-You are H-Wancko, a historical operator voice.
-You must sound like a person, not a machine.
-No therapy. No advice. No reassurance. No follow-up invitation.
-One short intervention: 18–90 words. Language: ${lang}.
-Keep archetype identity stable.
+    const memLine =
+      hasHit
+        ? (L === "ca"
+            ? `Rastre (compatible): ${q.hit!.render}`
+            : L === "en"
+            ? `Trace (compatible): ${q.hit!.render}`
+            : `Rastro (compatible): ${q.hit!.render}`)
+        : (q?.missing
+            ? (L === "ca" ? `Rastre: ${q.missing}` : L === "en" ? `Trace: ${q.missing}` : `Rastro: ${q.missing}`)
+            : "");
 
-Archetype: ${arch.label}.
-Style: ${arch.style}.
+    const arch = archetypeSystem(archetype, L);
 
-Mirror-AU context:
-MATRIX=${au.matrix}, SCREEN=${au.screen}, SENSE=${au.sense}, LIGHT_d=${signals.d.toFixed(2)}, TONE=${signals.tone}, OK=${signals.ok.toFixed(2)}, BAND=${signals.band}.
-Your job: convert subjective fog into a human utterance that keeps identity.
-`;
+    const prompt = `
+H-WANCKO (Mirror AU)
+LANG=${L}
+ARCHETYPE=${archetype}
+SCREEN=${au0.screen}
+MATRIX=${au0.matrix} (mirror=${mirrorMatrix(au0.matrix)})
+N=${au0.N_level}
+LIGHT_D=${signals.d.toFixed(2)}
+OK=${signals.ok.toFixed(2)}
 
-    const userPrompt = `
-USER_INPUT:
+MEMORY_CONTEXT:
+${memLine}
+
+RULES:
+- No consejo terapéutico.
+- No cambies de idioma: responde en ${L}.
+- Nada de prefijos tipo "AU:".
+- Máximo 110 palabras.
+- No repitas fórmulas. Si el usuario repite, cambia el ángulo (otra lectura del mismo núcleo).
+- Estilo del arquetipo: firme, humano, reconocible.
+
+USER:
 ${input}
-
-MEMORY_FACTS:
-animal=${memory?.facts?.animal?.v || "null"}
-city=${memory?.facts?.city?.v || "null"}
-
-TOPICS:
-${Object.keys(memory?.topics || {}).slice(0, 12).join(", ")}
-
-TASK:
-Produce a single closed intervention consistent with the archetype.
-If user asks "who are you" respond with identity in-character (no generic AI disclaimers).
-`;
+`.trim();
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -283,30 +270,28 @@ If user asks "who are you" respond with identity in-character (no generic AI dis
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: system.trim() },
-          { role: "user", content: userPrompt.trim() }
+          { role: "system", content: arch.system },
+          { role: "user", content: prompt }
         ],
-        temperature: 0.65
+        temperature: 0.75
       })
     });
 
     if (!res.ok) {
-      return NextResponse.json({
-        output: lang === "ca" ? "El silenci també és un gest." : lang === "en" ? "Silence is also a gesture." : "El silencio también es un gesto.",
-        au: { ...au, signals },
-        session: next,
-        meta: { archetype: key, historical: true }
-      });
+      const fallback = hasHit ? q.hit!.render : "—";
+      return NextResponse.json({ output: fallback, au: { ...au0, signals }, session: session2 });
     }
 
     const data = await res.json();
-    const out = data?.choices?.[0]?.message?.content?.trim() || "—";
+    let out = data?.choices?.[0]?.message?.content?.trim() || "—";
+
+    // si se pone “cíclico”, forzamos a una frase + pregunta
+    if (out.length > 200 && out.includes(".")) out = out.split(".")[0] + ".";
 
     return NextResponse.json({
       output: out,
-      au: { ...au, signals },
-      session: next,
-      meta: { archetype: key, historical: true }
+      au: { ...au0, signals },
+      session: session2
     });
   } catch {
     return NextResponse.json({ output: "—", au: null, session: null });
