@@ -5,7 +5,7 @@ import {
   queryMemory,
   type AUHashState,
   type Lang,
-} from "@/lib/auhash/minimal";
+} from "../../../lib/auhash/minimal";
 
 /* =========================================================
    Tipos
