@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import type { AUHashState, Lang } from "@/lib/auhash/kernel";
-import { ingestText, ensureState, queryMemory } from "@/lib/auhash/minimal";
+import type { AUHashState, Lang } from "../../../lib/auhash/kernel";
+import { ingestText, ensureState, queryMemory } from "../../../lib/auhash/minimal";
 
 /** =========================================================
  * H-WANCKO API — AU v0.7 (TS)
