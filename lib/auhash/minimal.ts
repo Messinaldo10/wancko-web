@@ -71,7 +71,7 @@ export function ensureState(prev?: AUHashState | null): AUHashState {
 }
 
 /* =========================================================
-   Ingesta semántica
+   Ingesta semántica con acumulación suave
 ========================================================= */
 
 export function ingestText(
@@ -100,7 +100,9 @@ export function ingestText(
     const prevTopic = topics[key];
     const wPrev = prevTopic?.w ?? 0;
 
-    const wNew = clamp01(wPrev + (role === "user" ? 0.08 : 0.04));
+    // incremento menor para evitar fijación excesiva
+    const increment = role === "user" ? 0.06 : 0.03;
+    const wNew = clamp01(wPrev + increment);
 
     const topic: AUHashTopic = {
       w: wNew,
@@ -122,7 +124,7 @@ export function ingestText(
 }
 
 /* =========================================================
-   Consulta dominio dominante
+   Consulta dinámica con decaimiento temporal real
 ========================================================= */
 
 export function queryMemory(
@@ -130,18 +132,34 @@ export function queryMemory(
   topN: number = 6
 ) {
   const s = ensureState(state);
+  const now = Date.now();
 
-  const entries = Object.entries(s.memory.topics || {});
+  const scored = Object.entries(s.memory.topics || {}).map(([k, v]) => {
 
-  entries.sort((a, b) => (b[1]?.w ?? 0) - (a[1]?.w ?? 0));
+    const ageSeconds = (now - v.last) / 1000;
 
-  return entries.slice(0, topN).map(([k, v]) => ({
-    k,
-    w: v.w,
-    last: v.last,
-    domain: inferDomain(k)   // 👈 añadimos dominio semántico
-  }));
+    // decaimiento exponencial (media vida ~18s)
+    const freshness = Math.exp(-ageSeconds / 18);
+
+    const score = v.w * freshness;
+
+    return {
+      k,
+      w: v.w,
+      last: v.last,
+      score,
+      domain: inferDomain(k)
+    };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
+  return scored.slice(0, topN);
 }
+
+/* =========================================================
+   Dominio semántico ligero (expandible)
+========================================================= */
 
 function inferDomain(token: string): string {
   const t = token.toLowerCase();
@@ -157,6 +175,12 @@ function inferDomain(token: string): string {
 
   if (["miedo", "gana", "hambre", "deseo"].includes(t))
     return "impulso";
+
+  if (["platja", "muntanya", "playa", "montaña"].includes(t))
+    return "lugar";
+
+  if (["calamars", "comida", "menjar", "hambre"].includes(t))
+    return "cuerpo";
 
   return "tema";
 }
