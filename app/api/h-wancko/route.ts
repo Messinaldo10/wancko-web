@@ -1,105 +1,131 @@
 // app/api/h-wancko/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { ensureState, ingestText, queryMemory } from "../../../lib/auhash/minimal";
+
+import {
+  ensureState,
+  ingestText,
+  queryMemory,
+  type MemoryHit
+} from "../../../lib/auhash/minimal";
+
 import type { AUHashState, Lang } from "../../../lib/auhash/kernel";
+
+import { computeAU, formatHit } from "../../../lib/auhash/engine";
+
+/* =========================================================
+   Tipos
+========================================================= */
 
 type HWanckoSession = {
   id: string;
   turns: number;
-  lang: Lang;
+  lang?: Lang;
   chain: string[];
   memory: AUHashState;
-  archetype?: string;
 };
 
+/* =========================================================
+   Helpers
+========================================================= */
+
 function detectLang(text: string, accept?: string): Lang {
-  const t = (text || "").toLowerCase();
+  const t = text.toLowerCase();
+
   if (/[àèéíïòóúüç·l]/.test(t)) return "ca";
   if (/[áéíóúñ¿¡]/.test(t)) return "es";
   if (accept?.startsWith("ca")) return "ca";
   if (accept?.startsWith("es")) return "es";
+
   return "en";
 }
 
-function msg(lang: Lang, es: string, ca: string, en: string) {
-  return lang === "ca" ? ca : lang === "en" ? en : es;
-}
-
-function newSession(lang: Lang, archetype?: string): HWanckoSession {
+function newSession(): HWanckoSession {
   return {
     id: crypto.randomUUID(),
     turns: 0,
-    lang,
     chain: [],
-    memory: ensureState(null),
-    archetype,
+    memory: ensureState(null)
   };
 }
 
+/* =========================================================
+   POST
+========================================================= */
+
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({} as any));
-    const input: string = (body?.input || "").toString();
+    const body = await req.json();
+    const input: string = body?.input || "";
     const acceptLang = req.headers.get("accept-language") || undefined;
 
-    const detected = detectLang(input, acceptLang);
+    let session: HWanckoSession = body?.session || newSession();
 
-    const session: HWanckoSession = body?.session
-      ? {
-          ...body.session,
-          lang: (body.session.lang || detected) as Lang,
-          memory: ensureState(body.session.memory),
-        }
-      : newSession(detected, body?.archetype);
+    /* ---------- Language ---------- */
+
+    const detectedLang = detectLang(input, acceptLang);
+
+    if (!session.lang) {
+      session.lang = detectedLang;
+    }
+
+    /* ---------- Turn ---------- */
 
     session.turns += 1;
-    session.chain = Array.isArray(session.chain) ? session.chain : [];
     session.chain.push(input);
 
-    session.memory = ingestText(session.memory, input, "user", session.lang);
+    /* ---------- Ingest ---------- */
 
-    const hits = queryMemory(session.memory, 6);
+    session.memory = ingestText(
+      session.memory,
+      input,
+      "user",
+      session.lang
+    );
+
+    /* ---------- Memory hits ---------- */
+
+    const hits: MemoryHit[] = queryMemory(session.memory, 10);
     const top = hits[0];
 
-    const tone =
-      (top?.domain === "identidad" || top?.domain === "memoria") ? "night"
-      : (top?.domain === "estructura") ? "violet"
-      : "day";
+    /* ---------- AU computation ---------- */
 
-    const output = top?.k
-  ? msg(
-      session.lang,
-      `Me quedo con "${top.k}" (dominio: ${top.domain}). ¿Qué parte es espejo y cuál es motor?`,
-          `Em quedo amb "${top.k}" (domini: ${top.domain}). Quina part és mirall i quina és motor?`,
-          `I hold "${top.k}" (domain: ${top.domain}). Which part is mirror and which is engine?`
-        )
-      : msg(
-          session.lang,
-          "Dime una frase más: quiero fijar un eje.",
-          "Digue'm una frase més: vull fixar un eix.",
-          "Give me one more sentence: I want to fix an axis."
-        );
+    const au = computeAU(hits, session.turns);
 
-    const d = Math.max(0, Math.min(1, 0.45 + Math.log2(2 + session.turns) / 10));
+    /* ---------- Output ---------- */
 
-    const au = {
-      mode: "h-wancko",
-      screen: "mirror",
-      matrix: "AU",
-      N_level: session.turns,
-      signals: {
-        d,
-        band: 1,
-        ok: d,
-        tone, // day | violet | night
-        complexity: Math.log2(2 + session.turns) / 6,
-        beauty: 0.58,
-      },
-    };
+    let output: string | null = null;
 
-    return NextResponse.json({ output, session, au });
+    if (top) {
+      if (session.lang === "ca") {
+        output = `Em quedo amb ${formatHit("ca", top)}.`;
+      } else if (session.lang === "es") {
+        output = `Me quedo con ${formatHit("es", top)}.`;
+      } else {
+        output = `I stay with ${formatHit("en", top)}.`;
+      }
+    } else {
+      if (session.lang === "ca") {
+        output = "Què falta perquè això sigui decidible, ara?";
+      } else if (session.lang === "es") {
+        output = "¿Qué falta para que esto sea decidible, ahora?";
+      } else {
+        output = "What is missing for this to be decidable now?";
+      }
+    }
+
+    /* ---------- Response ---------- */
+
+    return NextResponse.json({
+      output,
+      session,
+      au
+    });
+
   } catch (e) {
     console.error(e);
-    return NextResponse.json({ error: "h-wancko error" }, { status: 500 });
+    return NextResponse.json(
+      { error: "h-wancko error" },
+      { status: 500 }
+    );
   }
 }

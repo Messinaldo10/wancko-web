@@ -1,6 +1,17 @@
 import type { AUHashState, AUHashTopic, Lang } from "./kernel";
 
 /* =========================================================
+   Types
+========================================================= */
+
+export type MemoryHit = {
+  k: string;
+  w: number;
+  last: number;
+  domain: string;
+};
+
+/* =========================================================
    Helpers
 ========================================================= */
 
@@ -17,41 +28,25 @@ function normalizeTokens(t: string): string[] {
     .filter(Boolean);
 }
 
-/* =========================================================
-   Stopwords estructurales (NO conceptos)
-========================================================= */
+function phoneticAU(token: string): number[] {
+  return token.split("").map((c) => c.charCodeAt(0) % 9);
+}
 
-const STOPWORDS = new Set([
-  "hola",
-  "estas",
-  "estás",
-  "aniré",
-  "anire",
-  "tinc",
-  "menjaré",
-  "menjare",
-  "voy",
-  "iré",
-  "ire",
-  "estoy",
-  "eres",
-  "soy",
-  "ser",
-  "hacer",
-  "hoy",
-  "avui",
-  "como",
-  "com",
-  "la",
-  "el",
-  "a",
-  "de",
-  "que",
-  "y"
-]);
+function inferDomain(token: string): string {
+  const t = token.toLowerCase();
+
+  if (["yo", "soy", "identidad", "quien"].includes(t)) return "identidad";
+  if (["recuerdo", "memoria", "pasado"].includes(t)) return "memoria";
+  if (["estructura", "sistema", "orden"].includes(t)) return "estructura";
+  if (["miedo", "gana", "hambre", "deseo"].includes(t)) return "impulso";
+  if (["platja", "playa", "casa", "montaña", "muntanya"].includes(t)) return "lugar";
+  if (["calamars", "hambre", "cuerpo"].includes(t)) return "cuerpo";
+
+  return "tema";
+}
 
 /* =========================================================
-   Estado
+   Estado base
 ========================================================= */
 
 export function ensureState(prev?: AUHashState | null): AUHashState {
@@ -60,18 +55,22 @@ export function ensureState(prev?: AUHashState | null): AUHashState {
   const now = Date.now();
 
   return {
-    v: 1,
+    v: 2,
     t0: now,
     t: now,
     memory: {
       topics: {},
-      langVotes: { es: 0, ca: 0, en: 0 }
+      langVotes: { es: 0, ca: 0, en: 0 },
+      meta: {
+        stuckCount: 0,
+        topHistory: []
+      }
     }
   };
 }
 
 /* =========================================================
-   Ingesta semántica con acumulación suave
+   Ingesta
 ========================================================= */
 
 export function ingestText(
@@ -92,22 +91,22 @@ export function ingestText(
   const topics = { ...s.memory.topics };
 
   for (const raw of tokens.slice(0, 12)) {
-    const key = raw.trim();
 
-    if (STOPWORDS.has(key)) continue;
-    if (key.length < 3) continue;
+    if (raw.length < 3) continue;
 
+    const key = raw;
     const prevTopic = topics[key];
-    const wPrev = prevTopic?.w ?? 0;
 
-    // incremento menor para evitar fijación excesiva
-    const increment = role === "user" ? 0.06 : 0.03;
-    const wNew = clamp01(wPrev + increment);
+    const wPrev = prevTopic?.w ?? 0;
+    const delta = role === "user" ? 0.08 : 0.04;
+    const wNew = clamp01(wPrev + delta);
 
     const topic: AUHashTopic = {
       w: wNew,
       last: now,
-      g: prevTopic?.g ?? []
+      g: prevTopic?.g ?? phoneticAU(key),
+      phon: prevTopic?.phon ?? phoneticAU(key),
+      domain: prevTopic?.domain ?? inferDomain(key)
     };
 
     topics[key] = topic;
@@ -124,63 +123,24 @@ export function ingestText(
 }
 
 /* =========================================================
-   Consulta dinámica con decaimiento temporal real
+   Consulta memoria
 ========================================================= */
 
 export function queryMemory(
   state: AUHashState | null | undefined,
   topN: number = 6
-) {
+): MemoryHit[] {
+
   const s = ensureState(state);
-  const now = Date.now();
 
-  const scored = Object.entries(s.memory.topics || {}).map(([k, v]) => {
+  const entries = Object.entries(s.memory.topics || {});
 
-    const ageSeconds = (now - v.last) / 1000;
+  entries.sort((a, b) => (b[1]?.w ?? 0) - (a[1]?.w ?? 0));
 
-    // decaimiento exponencial (media vida ~18s)
-    const freshness = Math.exp(-ageSeconds / 18);
-
-    const score = v.w * freshness;
-
-    return {
-      k,
-      w: v.w,
-      last: v.last,
-      score,
-      domain: inferDomain(k)
-    };
-  });
-
-  scored.sort((a, b) => b.score - a.score);
-
-  return scored.slice(0, topN);
-}
-
-/* =========================================================
-   Dominio semántico ligero (expandible)
-========================================================= */
-
-function inferDomain(token: string): string {
-  const t = token.toLowerCase();
-
-  if (["yo", "soy", "identidad", "quien"].includes(t))
-    return "identidad";
-
-  if (["recuerdo", "memoria", "pasado"].includes(t))
-    return "memoria";
-
-  if (["estructura", "sistema", "orden"].includes(t))
-    return "estructura";
-
-  if (["miedo", "gana", "hambre", "deseo"].includes(t))
-    return "impulso";
-
-  if (["platja", "muntanya", "playa", "montaña"].includes(t))
-    return "lugar";
-
-  if (["calamars", "comida", "menjar", "hambre"].includes(t))
-    return "cuerpo";
-
-  return "tema";
+  return entries.slice(0, topN).map(([k, v]) => ({
+    k,
+    w: v.w,
+    last: v.last,
+    domain: v.domain
+  }));
 }
