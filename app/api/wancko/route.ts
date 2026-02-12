@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  ensureState,
   ingestText,
   queryMemory,
-  type AUHashState,
-  type Lang,
+  ensureState,
 } from "../../../lib/auhash/minimal";
+
+import type { AUHashState, Lang } from "../../../lib/auhash/kernel";
 
 /* =========================================================
    Tipos
@@ -48,7 +48,7 @@ function newSession(): WanckoSession {
       band: 1,
       ok_live: 0.5,
     },
-    memory: ensureState(),
+    memory: ensureState(undefined),
   };
 }
 
@@ -67,6 +67,7 @@ export async function POST(req: NextRequest) {
     /* ---------------------------
        Lengua
     --------------------------- */
+
     const detectedLang = detectLang(input, acceptLang);
 
     if (!session.lang) {
@@ -76,12 +77,14 @@ export async function POST(req: NextRequest) {
     /* ---------------------------
        Turno
     --------------------------- */
+
     session.turns += 1;
     session.chain.push(input);
 
     /* ---------------------------
        Ingesta AU_HASH
     --------------------------- */
+
     session.memory = ingestText(
       session.memory,
       input,
@@ -90,46 +93,45 @@ export async function POST(req: NextRequest) {
     );
 
     /* ---------------------------
-       Consulta semántica (NO literal)
+       Consulta semántica
     --------------------------- */
-    const domain = queryMemory(session.memory, input);
 
-    /* ---------------------------
-       Respuesta base
-    --------------------------- */
+    const domain = queryMemory(session.memory);
+
     let output: string | null = null;
 
-    if (domain) {
-      // devuelve el concepto más estable del dominio
-      const value = queryMemory(session.memory, domain);
+    const value = domain[0];
 
-      if (value) {
-        if (session.lang === "ca")
-          output = `Has parlat de ${value}.`;
-        else if (session.lang === "en")
-          output = `You mentioned ${value}.`;
-        else
-          output = `Has mencionado ${value}.`;
+    if (value) {
+      if (session.lang === "ca") {
+        output = `He detectat coherència en ${value.k}.`;
+      } else if (session.lang === "en") {
+        output = `I detect coherence around ${value.k}.`;
+      } else {
+        output = `He detectado coherencia en ${value.k}.`;
       }
     }
 
     /* ---------------------------
        Silencio estratégico
     --------------------------- */
+
     if (!output) {
       session.silenceCount += 1;
 
-      if (session.lang === "ca")
+      if (session.lang === "ca") {
         output = "Què falta perquè això sigui decidible, ara?";
-      else if (session.lang === "en")
+      } else if (session.lang === "en") {
         output = "What is missing for this to be decidable, now?";
-      else
+      } else {
         output = "¿Qué falta para que esto sea decidible, ahora?";
+      }
     }
 
     /* ---------------------------
-       Señales AU (dinámicas)
+       Señales AU dinámicas
     --------------------------- */
+
     const ok_live = Math.max(
       0,
       Math.min(1, 0.5 + (session.turns - session.silenceCount) * 0.02)
@@ -157,6 +159,7 @@ export async function POST(req: NextRequest) {
       au,
       cert: null,
     });
+
   } catch (e) {
     console.error(e);
     return NextResponse.json(
