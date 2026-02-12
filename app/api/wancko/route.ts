@@ -2,7 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureState, ingestText, queryMemory } from "../../../lib/auhash/minimal";
 import type { AUHashState, Lang } from "../../../lib/auhash/kernel";
-import type { MemoryHit } from "../../../lib/auhash/minimal";
+
 
 type WanckoSession = {
   id: string;
@@ -42,11 +42,17 @@ function msg(lang: Lang, es: string, ca: string, en: string) {
   return lang === "ca" ? ca : lang === "en" ? en : es;
 }
 
-function formatHit(lang: Lang, hit: MemoryHit) {
-  // “token humano + dominio”
-  if (lang === "ca") return `${hit.token} (domini: ${hit.domain})`;
-  if (lang === "en") return `${hit.token} (domain: ${hit.domain})`;
-  return `${hit.token} (dominio: ${hit.domain})`;
+function formatHit(
+  lang: Lang,
+  hit: { k: string; w: number; last: number; domain: string }
+): string {
+  if (lang === "ca")
+    return `${hit.k} (domini: ${hit.domain})`;
+
+  if (lang === "en")
+    return `${hit.k} (domain: ${hit.domain})`;
+
+  return `${hit.k} (dominio: ${hit.domain})`;
 }
 
 export async function POST(req: NextRequest) {
@@ -78,7 +84,7 @@ export async function POST(req: NextRequest) {
 
     let output: string | null = null;
 
-    if (top?.token) {
+    if (top) {
       output = msg(
         session.lang,
         `He detectado coherencia en ${formatHit(session.lang, top)}.`,

@@ -66,12 +66,12 @@ export async function POST(req: NextRequest) {
       : (top?.domain === "estructura") ? "violet"
       : "day";
 
-    const output = top?.token
-      ? msg(
-          session.lang,
-          `Me quedo con "${top.token}" (dominio: ${top.domain}). ¿Qué parte es espejo y cuál es motor?`,
-          `Em quedo amb "${top.token}" (domini: ${top.domain}). Quina part és mirall i quina és motor?`,
-          `I hold "${top.token}" (domain: ${top.domain}). Which part is mirror and which is engine?`
+    const output = top?.k
+  ? msg(
+      session.lang,
+      `Me quedo con "${top.k}" (dominio: ${top.domain}). ¿Qué parte es espejo y cuál es motor?`,
+          `Em quedo amb "${top.k}" (domini: ${top.domain}). Quina part és mirall i quina és motor?`,
+          `I hold "${top.k}" (domain: ${top.domain}). Which part is mirror and which is engine?`
         )
       : msg(
           session.lang,
