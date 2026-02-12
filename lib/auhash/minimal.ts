@@ -76,7 +76,15 @@ export function ingestText(
     const prevTopic = topics[key];
     const wPrev = prevTopic?.w ?? 0;
 
-    const wNew = clamp01(wPrev + (role === "user" ? 0.08 : 0.04));
+    // Decaimiento general previo
+for (const k in topics) {
+  topics[k].w = clamp01(topics[k].w * 0.92);
+}
+
+// Refuerzo del término actual
+const reinforcement = role === "user" ? 0.15 : 0.07;
+const wNew = clamp01(wPrev + reinforcement);
+
     const domain = detectDomain(tok);
 
     // Importante: no guardamos g si no existe (evita líos con TS)
