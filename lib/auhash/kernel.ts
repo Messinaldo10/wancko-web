@@ -1,29 +1,19 @@
-/* =========================================================
-   AU_HASH Kernel Types
-   Base estructural mínima para Wancko / H-Wancko
-========================================================= */
+// lib/auhash/kernel.ts
 
 export type Lang = "es" | "ca" | "en";
 
-/* ---------- Topic ---------- */
-/*
-  g es opcional porque no siempre existe.
-  Esto evita el error exactOptionalPropertyTypes.
-*/
 export type AUHashTopic = {
-  w: number;        // weight 0..1
+  w: number;        // peso 0..1
   last: number;     // timestamp
-  g?: number[];     // glifos opcionales
+  token?: string;   // palabra "humana" asociada al hash (para no mostrar "Txxxx")
+  domain?: string;  // dominio humano (ej: "identidad", "movimiento", etc.)
+  g?: number[];     // opcional (para futuro AU: glifos/gradiente)
 };
-
-/* ---------- Memory ---------- */
 
 export type AUHashMemory = {
   topics: Record<string, AUHashTopic>;
   langVotes: Record<Lang, number>;
 };
-
-/* ---------- State ---------- */
 
 export type AUHashState = {
   v: number;

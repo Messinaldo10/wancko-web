@@ -1,118 +1,105 @@
+// app/api/h-wancko/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { ingestText, ensureState, queryMemory } from "../../../lib/auhash/minimal";
+import { ensureState, ingestText, queryMemory } from "../../../lib/auhash/minimal";
 import type { AUHashState, Lang } from "../../../lib/auhash/kernel";
 
-/* =========================================================
-   Tipos de sesión H-Wancko
-========================================================= */
-
-interface HWSession {
-  v: number;
+type HWanckoSession = {
+  id: string;
   turns: number;
   lang: Lang;
-  memory: AUHashState;
   chain: string[];
+  memory: AUHashState;
+  archetype?: string;
+};
+
+function detectLang(text: string, accept?: string): Lang {
+  const t = (text || "").toLowerCase();
+  if (/[àèéíïòóúüç·l]/.test(t)) return "ca";
+  if (/[áéíóúñ¿¡]/.test(t)) return "es";
+  if (accept?.startsWith("ca")) return "ca";
+  if (accept?.startsWith("es")) return "es";
+  return "en";
 }
 
-/* =========================================================
-   Utilidades
-========================================================= */
-
-function detectLangStable(text: string, fallback: Lang): Lang {
-  if (!text) return fallback;
-
-  if (/[áéíóúñ¿¡]/i.test(text)) return "es";
-  if (/[àèíòúç·]/i.test(text)) return "ca";
-  if (/[a-z]/i.test(text)) return "en";
-
-  return fallback;
+function msg(lang: Lang, es: string, ca: string, en: string) {
+  return lang === "ca" ? ca : lang === "en" ? en : es;
 }
 
-function buildSession(prev: HWSession | null, lang: Lang): HWSession {
-  const base =
-    prev && prev.v === 2
-      ? prev
-      : {
-          v: 2,
-          turns: 0,
-          lang,
-          memory: ensureState(null),
-          chain: [],
-        };
-
-  const fixedLang = detectLangStable("", base.lang || lang);
-
+function newSession(lang: Lang, archetype?: string): HWanckoSession {
   return {
-    ...base,
-    lang: fixedLang,
-    memory: ensureState(base.memory),
-    chain: Array.isArray(base.chain) ? base.chain : [],
+    id: crypto.randomUUID(),
+    turns: 0,
+    lang,
+    chain: [],
+    memory: ensureState(null),
+    archetype,
   };
 }
 
-/* =========================================================
-   POST
-========================================================= */
-
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const text: string = body?.text || "";
-    const prevSession: HWSession | null = body?.session || null;
+    const body = await req.json().catch(() => ({} as any));
+    const input: string = (body?.input || "").toString();
+    const acceptLang = req.headers.get("accept-language") || undefined;
 
-    const acceptLang: Lang =
-      (req.headers.get("accept-language")?.slice(0, 2) as Lang) || "es";
+    const detected = detectLang(input, acceptLang);
 
-    const session = buildSession(prevSession, acceptLang);
+    const session: HWanckoSession = body?.session
+      ? {
+          ...body.session,
+          lang: (body.session.lang || detected) as Lang,
+          memory: ensureState(body.session.memory),
+        }
+      : newSession(detected, body?.archetype);
 
-    /* ===== INGESTAR TEXTO ===== */
+    session.turns += 1;
+    session.chain = Array.isArray(session.chain) ? session.chain : [];
+    session.chain.push(input);
 
-    const updatedMemory = ingestText(
-  session.memory,
-  text,
-  "user",
-  session.lang
-);
+    session.memory = ingestText(session.memory, input, "user", session.lang);
 
+    const hits = queryMemory(session.memory, 6);
+    const top = hits[0];
 
+    const tone =
+      (top?.domain === "identidad" || top?.domain === "memoria") ? "night"
+      : (top?.domain === "estructura") ? "violet"
+      : "day";
 
-    /* ===== CONSULTA DOMINIO ===== */
+    const output = top?.token
+      ? msg(
+          session.lang,
+          `Me quedo con "${top.token}" (dominio: ${top.domain}). ¿Qué parte es espejo y cuál es motor?`,
+          `Em quedo amb "${top.token}" (domini: ${top.domain}). Quina part és mirall i quina és motor?`,
+          `I hold "${top.token}" (domain: ${top.domain}). Which part is mirror and which is engine?`
+        )
+      : msg(
+          session.lang,
+          "Dime una frase más: quiero fijar un eje.",
+          "Digue'm una frase més: vull fixar un eix.",
+          "Give me one more sentence: I want to fix an axis."
+        );
 
-    const domain = queryMemory(updatedMemory);
+    const d = Math.max(0, Math.min(1, 0.45 + Math.log2(2 + session.turns) / 10));
 
-    /* ===== RESPUESTA DINÁMICA ===== */
-
-    let reply = "";
-
-    if (domain) {
-      reply = `↺ ${domain}`;
-    } else {
-      reply =
-        session.lang === "ca"
-          ? "Reflexiona abans de respondre."
-          : session.lang === "en"
-          ? "Reflect before responding."
-          : "Reflexiona antes de responder.";
-    }
-
-    /* ===== NUEVA SESIÓN ===== */
-
-    const newSession: HWSession = {
-      ...session,
-      turns: session.turns + 1,
-      memory: updatedMemory,
-      chain: [...session.chain, text],
+    const au = {
+      mode: "h-wancko",
+      screen: "mirror",
+      matrix: "AU",
+      N_level: session.turns,
+      signals: {
+        d,
+        band: 1,
+        ok: d,
+        tone, // day | violet | night
+        complexity: Math.log2(2 + session.turns) / 6,
+        beauty: 0.58,
+      },
     };
 
-    return NextResponse.json({
-      reply,
-      session: newSession,
-    });
-  } catch (err) {
-    console.error("H-Wancko error:", err);
-    return NextResponse.json(
-      { error: "Internal error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ output, session, au });
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ error: "h-wancko error" }, { status: 500 });
   }
 }
