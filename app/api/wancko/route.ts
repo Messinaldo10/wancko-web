@@ -1,58 +1,37 @@
 // app/api/wancko/route.ts
 import { NextRequest, NextResponse } from "next/server";
-
-import {
-  ensureState,
-  ingestText,
-  queryMemory,
-  type MemoryHit
-} from "../../../lib/auhash/minimal";
-
+import { ensureState, ingestText, queryMemory } from "../../../lib/auhash/minimal";
 import type { AUHashState, Lang } from "../../../lib/auhash/kernel";
-
+import type { MemoryHit } from "../../../lib/auhash/minimal";
+import { applyTor } from "../../../lib/auhash/tor";
 import { computeAU, formatHit } from "../../../lib/auhash/engine";
-
-/* =========================================================
-   Tipos
-========================================================= */
 
 type WanckoSession = {
   id: string;
   turns: number;
-  lang?: Lang;
+  lang: Lang;
   chain: string[];
   silenceCount: number;
   memory: AUHashState;
 };
 
-/* =========================================================
-   Helpers
-========================================================= */
-
 function detectLang(text: string, accept?: string): Lang {
-  const t = text.toLowerCase();
-
-  if (/[àèéíïòóúüç·l]/.test(t)) return "ca";
-  if (/[áéíóúñ¿¡]/.test(t)) return "es";
-  if (accept?.startsWith("ca")) return "ca";
-  if (accept?.startsWith("es")) return "es";
-
+  const t = (text || "").toLowerCase();
+  if (/[àèéíïòóúüç·l]/.test(t) || accept?.startsWith("ca")) return "ca";
+  if (/[áéíóúñ¿¡]/.test(t) || accept?.startsWith("es")) return "es";
   return "en";
 }
 
-function newSession(): WanckoSession {
+function newSession(lang: Lang): WanckoSession {
   return {
     id: crypto.randomUUID(),
     turns: 0,
+    lang,
     chain: [],
     silenceCount: 0,
     memory: ensureState(null)
   };
 }
-
-/* =========================================================
-   POST
-========================================================= */
 
 export async function POST(req: NextRequest) {
   try {
@@ -60,76 +39,69 @@ export async function POST(req: NextRequest) {
     const input: string = body?.input || "";
     const acceptLang = req.headers.get("accept-language") || undefined;
 
-    let session: WanckoSession = body?.session || newSession();
-
-    /* ---------- Language ---------- */
-
-    const detectedLang = detectLang(input, acceptLang);
-
-    if (!session.lang) {
-      session.lang = detectedLang;
-    }
-
-    /* ---------- Turn ---------- */
+    const lang = detectLang(input, acceptLang);
+    let session: WanckoSession = body?.session || newSession(lang);
+    if (!session.lang) session.lang = lang;
 
     session.turns += 1;
+    session.chain = Array.isArray(session.chain) ? session.chain : [];
     session.chain.push(input);
 
-    /* ---------- Ingest ---------- */
+    // ingest
+    session.memory = ingestText(session.memory, input, "user", session.lang);
 
-    session.memory = ingestText(
-      session.memory,
-      input,
-      "user",
-      session.lang
-    );
+    // hits
+    let hits: MemoryHit[] = queryMemory(session.memory, 10);
 
-    /* ---------- Memory hits ---------- */
+    // TOR
+    const tor = applyTor("wancko", session.memory, hits, session.turns);
+    session.memory = tor.state;
 
-    const hits: MemoryHit[] = queryMemory(session.memory, 10);
-    const top = hits[0];
+    // (opcional) refrescar hits tras TOR si quieres más precisión:
+    hits = queryMemory(session.memory, 10);
 
-    /* ---------- AU computation ---------- */
+    const top = tor.decision.pick || hits[0] || null;
 
-    const au = computeAU(hits, session.turns);
-
-    /* ---------- Output ---------- */
-
+    // output
     let output: string | null = null;
 
     if (top) {
       if (session.lang === "ca") {
-        output = `He detectat coherència en ${formatHit("ca", top)}.`;
-      } else if (session.lang === "es") {
-        output = `He detectado coherencia en ${formatHit("es", top)}.`;
+        output = `He detectat coherència en ${formatHit(session.lang, top)}.`;
+      } else if (session.lang === "en") {
+        output = `I detect coherence around ${formatHit(session.lang, top)}.`;
       } else {
-        output = `I detect coherence in ${formatHit("en", top)}.`;
-      }
-    } else {
-      session.silenceCount += 1;
-
-      if (session.lang === "ca") {
-        output = "Què falta perquè això sigui decidible, ara?";
-      } else if (session.lang === "es") {
-        output = "¿Qué falta para que esto sea decidible, ahora?";
-      } else {
-        output = "What is missing for this to be decidable now?";
+        output = `He detectado coherencia en ${formatHit(session.lang, top)}.`;
       }
     }
 
-    /* ---------- Response ---------- */
+    // silencio estratégico (TOR puede sugerirlo con anti=silence)
+    if (!output || tor.decision.anti === "silence") {
+      session.silenceCount += 1;
+      if (session.lang === "ca") output = "Què falta perquè això sigui decidible, ara?";
+      else if (session.lang === "en") output = "What is missing for this to be decidable, now?";
+      else output = "¿Qué falta para que esto sea decidible, ahora?";
+    }
+
+    const au = computeAU(
+      "wancko",
+      hits,
+      session.turns,
+      session.silenceCount,
+      tor.decision,
+      session.lang
+    );
 
     return NextResponse.json({
       output,
       session,
-      au
+      au,
+      cert: null,
+      hai: null,
+      baski: null
     });
-
   } catch (e) {
     console.error(e);
-    return NextResponse.json(
-      { error: "wancko error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "wancko error" }, { status: 500 });
   }
 }

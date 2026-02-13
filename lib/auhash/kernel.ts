@@ -1,21 +1,51 @@
 // lib/auhash/kernel.ts
 export type Lang = "es" | "ca" | "en";
 
+/** Un “glifo” mínimo (por ahora numérico) */
+export type AUGlyph = number;
+
+/** Evento causal TOR: no se borra, se suspende/activa */
+export type TorEvent = {
+  t: number;
+  mode: "wancko" | "hwancko";
+  action: "hash" | "nohash" | "suspend" | "activate" | "release" | "hold";
+  token?: string;       // prestado (solo para lectura humana, no es “verdad”)
+  key?: string;         // hash estable
+  domain: string;
+  causes: string[];     // causas (tokens/keys) que empujaron
+  effects: string[];    // efectos (p.ej. “tone=amber”, “anti=silence”)
+  suspended?: boolean;
+};
+
 export type AUHashTopic = {
-  w: number;      // peso bruto acumulado
-  last: number;   // timestamp last seen
-  g: number[];    // reservado para geometría AU posterior (siempre array)
-  phon: number[]; // vector fonético mínimo (jerarquía sub-palabra)
-  domain: string; // dominio semántico humano (tema/lugar/cuerpo/...)
+  /** peso (relevancia base) */
+  w: number;
+  /** última vez que se tocó */
+  last: number;
+
+  /** glifo fonético jerárquico (provisional): números que codifican composición */
+  phon: AUGlyph[];
+
+  /** dominio semántico humano */
+  domain: string;
+
+  /** “grain” extra (reservado a futuro) */
+  g: AUGlyph[];
+
+  /** si está suspendido, no compite como top */
+  suspendedUntil: number; // 0 si no
 };
 
 export type AUHashMemory = {
   topics: Record<string, AUHashTopic>;
   langVotes: Record<Lang, number>;
+
+  /** meta-TOR (no es memoria “de palabras”, es dinámica + causalidad) */
   meta: {
-    lastPicked?: string; // para anti-dominancia
-    stuckCount: number;  // contador si se repite el mismo pick
-    topHistory: Array<{ t: number; token: string }>; // estabilidad para beauty
+    stuckCount: number;
+    lastPickedKey: string | null;
+    topHistory: { t: number; key: string; token?: string; domain: string }[];
+    events: TorEvent[];
   };
 };
 

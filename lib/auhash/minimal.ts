@@ -1,77 +1,97 @@
-import type { AUHashState, AUHashTopic, Lang } from "./kernel";
-
-/* =========================================================
-   Types
-========================================================= */
+// lib/auhash/minimal.ts
+import type { AUHashMemory, AUHashState, AUHashTopic, Lang } from "./kernel";
 
 export type MemoryHit = {
-  k: string;
+  key: string;
+  token: string;  // prestado (solo UX)
+  domain: string;
   w: number;
   last: number;
-  domain: string;
+  phon: number[];
+  suspended: boolean;
+  score: number; // score base (sin TOR)
 };
-
-/* =========================================================
-   Helpers
-========================================================= */
 
 function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
 }
 
+function hashKey(s: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return "T" + (h >>> 0).toString(16);
+}
+
 function normalizeTokens(t: string): string[] {
-  return t
+  return (t || "")
     .toLowerCase()
     .replace(/https?:\/\/\S+/g, " ")
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .split(/\s+/)
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((x) => x.length >= 2);
 }
 
+/** transliteración fonética AU mínima (provisional, jerárquica) */
 function phoneticAU(token: string): number[] {
-  return token.split("").map((c) => c.charCodeAt(0) % 9);
+  // Mapa simple y estable -> vector pequeño
+  // (esto lo iremos refinando a niveles letra→sílabas→palabra)
+  const t = token.toLowerCase();
+  const out: number[] = [];
+  for (let i = 0; i < Math.min(10, t.length); i++) {
+    const c = t.charCodeAt(i);
+    out.push((c % 31) + 1);
+  }
+  return out.length ? out : [0];
+}
+
+function guessLang(t: string): Lang {
+  const low = (t || "").toLowerCase();
+  if (/[àèéíïòóúüç·l]/.test(low) || /\b(per què|què|a on|m'ho)\b/.test(low)) return "ca";
+  if (/[áéíóúñ¿¡]/.test(low) || /\b(qué|por qué|dónde|recuerda)\b/.test(low)) return "es";
+  return "en";
 }
 
 function inferDomain(token: string): string {
   const t = token.toLowerCase();
 
-  if (["yo", "soy", "identidad", "quien"].includes(t)) return "identidad";
-  if (["recuerdo", "memoria", "pasado"].includes(t)) return "memoria";
-  if (["estructura", "sistema", "orden"].includes(t)) return "estructura";
-  if (["miedo", "gana", "hambre", "deseo"].includes(t)) return "impulso";
-  if (["platja", "playa", "casa", "montaña", "muntanya"].includes(t)) return "lugar";
-  if (["calamars", "hambre", "cuerpo"].includes(t)) return "cuerpo";
+  // identidad / memoria / estructura / impulso / lugar / cuerpo / tiempo (expandible)
+  if (["yo", "soy", "identidad", "quien", "quién", "self"].includes(t)) return "identidad";
+  if (["recuerdo", "memoria", "pasado", "recordar"].includes(t)) return "memoria";
+  if (["estructura", "sistema", "orden", "regla"].includes(t)) return "estructura";
+  if (["miedo", "gana", "hambre", "deseo", "ansiedad"].includes(t)) return "impulso";
+  if (["casa", "hogar", "mercat", "mercado", "platja", "playa", "muntanya", "montaña"].includes(t)) return "lugar";
+  if (["calamars", "calamares", "menjar", "comer", "cuerpo", "dolor"].includes(t)) return "cuerpo";
+  if (["avui", "hoy", "demà", "mañana", "ayer"].includes(t)) return "tiempo";
 
   return "tema";
 }
 
-/* =========================================================
-   Estado base
-========================================================= */
-
 export function ensureState(prev?: AUHashState | null): AUHashState {
-  if (prev && typeof prev === "object" && prev.memory) return prev;
-
   const now = Date.now();
+  if (prev && typeof prev === "object" && prev.memory && prev.v === 2) return prev;
+
+  const memory: AUHashMemory = {
+    topics: {},
+    langVotes: { es: 0, ca: 0, en: 0 },
+    meta: {
+      stuckCount: 0,
+      lastPickedKey: null,
+      topHistory: [],
+      events: []
+    }
+  };
 
   return {
     v: 2,
     t0: now,
     t: now,
-    memory: {
-      topics: {},
-      langVotes: { es: 0, ca: 0, en: 0 },
-      meta: {
-        stuckCount: 0,
-        topHistory: []
-      }
-    }
+    memory
   };
 }
-
-/* =========================================================
-   Ingesta
-========================================================= */
 
 export function ingestText(
   prev: AUHashState | null | undefined,
@@ -79,37 +99,39 @@ export function ingestText(
   role: "user" | "assistant",
   langHint?: Lang
 ): AUHashState {
-
   const s = ensureState(prev);
   const now = Date.now();
+  const trimmed = (text || "").trim();
+  if (!trimmed) return { ...s, t: now };
 
-  if (!text?.trim()) {
-    return { ...s, t: now };
-  }
+  // votos de idioma (leve)
+  const lang = langHint || guessLang(trimmed);
+  const lv = { ...s.memory.langVotes };
+  lv[lang] = (lv[lang] || 0) + (role === "user" ? 2 : 1);
 
-  const tokens = normalizeTokens(text);
-  const topics = { ...s.memory.topics };
+  // tokens
+  const toks = normalizeTokens(trimmed);
+  const topics: Record<string, AUHashTopic> = { ...s.memory.topics };
 
-  for (const raw of tokens.slice(0, 12)) {
+  // delta base (no decide nada “político”)
+  const delta = role === "user" ? 0.08 : 0.04;
 
-    if (raw.length < 3) continue;
-
-    const key = raw;
+  for (const token of toks.slice(0, 14)) {
+    const key = hashKey(token);
     const prevTopic = topics[key];
-
     const wPrev = prevTopic?.w ?? 0;
-    const delta = role === "user" ? 0.08 : 0.04;
+
+    // subida suave
     const wNew = clamp01(wPrev + delta);
 
-    const topic: AUHashTopic = {
+    topics[key] = {
       w: wNew,
       last: now,
-      g: prevTopic?.g ?? phoneticAU(key),
-      phon: prevTopic?.phon ?? phoneticAU(key),
-      domain: prevTopic?.domain ?? inferDomain(key)
+      domain: prevTopic?.domain ?? inferDomain(token),
+      phon: prevTopic?.phon ?? phoneticAU(token),
+      g: prevTopic?.g ?? [],
+      suspendedUntil: prevTopic?.suspendedUntil ?? 0
     };
-
-    topics[key] = topic;
   }
 
   return {
@@ -117,30 +139,39 @@ export function ingestText(
     t: now,
     memory: {
       ...s.memory,
+      langVotes: lv,
       topics
     }
   };
 }
 
-/* =========================================================
-   Consulta memoria
-========================================================= */
-
-export function queryMemory(
-  state: AUHashState | null | undefined,
-  topN: number = 6
-): MemoryHit[] {
-
+export function queryMemory(state: AUHashState | null | undefined, topN: number = 10): MemoryHit[] {
   const s = ensureState(state);
+  const now = Date.now();
 
-  const entries = Object.entries(s.memory.topics || {});
+  // Convertimos topics->hits (sin depender del “token literal” persistido)
+  // token aquí será “prestado”: usamos key como fallback si no tenemos token.
+  const hits: MemoryHit[] = Object.entries(s.memory.topics || {}).map(([key, topic]) => {
+    const suspended = topic.suspendedUntil > now;
 
-  entries.sort((a, b) => (b[1]?.w ?? 0) - (a[1]?.w ?? 0));
+    // score base: peso + recencia (leve) - suspensión
+    const age = Math.max(0, now - (topic.last || now));
+    const rec = 1 / (1 + age / 45000); // ~45s
+    const base = clamp01(0.75 * topic.w + 0.25 * rec);
+    const score = suspended ? base * 0.05 : base;
 
-  return entries.slice(0, topN).map(([k, v]) => ({
-    k,
-    w: v.w,
-    last: v.last,
-    domain: v.domain
-  }));
+    return {
+      key,
+      token: key, // prestado (UI/engine puede reemplazar con token actual si lo tiene)
+      domain: topic.domain,
+      w: topic.w,
+      last: topic.last,
+      phon: topic.phon,
+      suspended,
+      score
+    };
+  });
+
+  hits.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  return hits.slice(0, topN);
 }
