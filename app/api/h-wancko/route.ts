@@ -55,22 +55,47 @@ export async function POST(req: NextRequest) {
     session.chain.push(input);
     session.archetype = body?.archetype || session.archetype || "estoic";
 
-    // ingest
-    session.memory = ingestText(session.memory, input, "user", session.lang);
+    /* =========================================================
+       1️⃣ Ingest
+    ========================================================= */
 
-    // hits
+    session.memory = ingestText(
+      session.memory,
+      input,
+      "user",
+      session.lang
+    );
+
+    /* =========================================================
+       2️⃣ Query hits antes de TOR
+    ========================================================= */
+
     let hits: MemoryHit[] = queryMemory(session.memory, 10);
 
-    // TOR (mismo regulador)
-    const tor = applyTor("hwancko", session.memory, hits, session.turns);
-    session.memory = tor.state;
+    /* =========================================================
+       3️⃣ Aplicar TOR (homeostasis)
+       Ahora SOLO devuelve nuevo estado
+    ========================================================= */
 
-    // refrescar hits tras TOR
+    session.memory = applyTor(
+      session.memory,
+      "hwancko",
+      hits,
+      hits[0]?.token
+    );
+
+    /* =========================================================
+       4️⃣ Recalcular hits después de TOR
+    ========================================================= */
+
     hits = queryMemory(session.memory, 10);
 
-    const top = tor.decision.pick || hits[0] || null;
+    const top = hits[0] || null;
 
-    // salida espejo: pregunta por “motor vs espejo”
+    /* =========================================================
+       5️⃣ Salida espejo
+    ========================================================= */
+
     let output: string | null = null;
 
     if (top) {
@@ -82,8 +107,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // silencio estratégico
-    if (!output || tor.decision.anti === "silence") {
+    /* =========================================================
+       6️⃣ Silencio estratégico
+       (si no hay top claro)
+    ========================================================= */
+
+    if (!output) {
       session.silenceCount += 1;
       output = msg(
         session.lang,
@@ -93,12 +122,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    /* =========================================================
+       7️⃣ Calcular AU (visual / color / complejidad)
+    ========================================================= */
+
     const au = computeAU(
       "hwancko",
       hits,
       session.turns,
       session.silenceCount,
-      tor.decision,
       session.lang
     );
 
@@ -107,8 +139,12 @@ export async function POST(req: NextRequest) {
       session,
       au
     });
+
   } catch (e) {
     console.error(e);
-    return NextResponse.json({ error: "h-wancko error" }, { status: 500 });
+    return NextResponse.json(
+      { error: "h-wancko error" },
+      { status: 500 }
+    );
   }
 }

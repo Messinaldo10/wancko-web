@@ -6,244 +6,144 @@ function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
 }
 
-function shannonEntropy(probs: number[]): number {
-  const p = probs.filter((x) => x > 0);
-  if (!p.length) return 0;
-  let h = 0;
-  for (const pi of p) h += -pi * Math.log(pi);
-  return h;
+function nowMs(): number {
+  return Date.now();
 }
 
-export type TorDecision = {
-  /** “hold” = quedarse (proteger/arbitrar); “release” = soltar */
-  hold: boolean;
-  /** anti-loop sugerido a UI */
-  anti: null | "silence" | "break";
-  /** entropía normalizada 0..1 */
-  entropy: number;
-  /** coherencia 0..1 (dominancia controlada) */
-  coherence: number;
-  /** token/key preferido (puede rotar) */
-  pick: MemoryHit | null;
-
-  /** métricas para estética (NO hardcode fijo) */
-  complexity: number;
-  beauty: number;
-
-  /** explicación corta */
-  reason: string;
-};
-
 /**
- * TOR aplica homeostasis:
- * - si entropía baja → conserva (hold suave + menos decay)
- * - si entropía alta → desprende (release + más decay + suspende dominantes)
+ * TOR homeostasis:
+ * - Si el top se repite demasiado -> “suspend” temporal del key dominante.
+ * - Si hay poca entropía (pocos hits) -> conserva (no suspende).
+ * - Si hay mucha entropía (muchos hits + dominancia alta) -> desprende (suspende top o rota).
  *
- * Y nunca “borra”: registra eventos y suspende/reactiva.
+ * No borra nada: solo ajusta suspendedUntil y registra eventos.
  */
 export function applyTor(
+  prev: AUHashState,
   mode: "wancko" | "hwancko",
-  state: AUHashState,
   hits: MemoryHit[],
-  turns: number,
-  now: number = Date.now()
-): { state: AUHashState; decision: TorDecision; hits: MemoryHit[] } {
-  const s = state;
+  borrowedTopToken?: string
+): AUHashState {
+  const s: AUHashState = prev;
+  const now = nowMs();
 
-  // --- Distribución para entropía ---
-  const scores = hits.map((h) => Math.max(0, h.score || 0));
-  const sum = scores.reduce((a, b) => a + b, 0) || 1;
-  const probs = scores.map((x) => x / sum);
+  const topics = { ...s.memory.topics };
+  const meta = { ...s.memory.meta };
+  const events: TorEvent[] = meta.events.slice(-180); // cap
 
-  const H = shannonEntropy(probs);
-  const Hmax = Math.log(Math.max(1, probs.length));
-  const entropy = Hmax > 0 ? clamp01(H / Hmax) : 0;
+  const top = hits[0];
+  const second = hits[1];
 
-  // dominancia (top share)
-  const top = hits[0] || null;
-  const topShare = top ? clamp01((top.score || 0) / sum) : 0;
-
-  // coherencia: alta si hay un “centro” pero sin monopolio extremo
-  const coherence = clamp01(1 - Math.abs(topShare - 0.42) * 1.6);
-
-  // Homeostasis: targetEntropy depende de turnos (al inicio queremos subir estructura)
-  const targetEntropy = clamp01(turns < 6 ? 0.32 : 0.45);
-
-  const deltaE = entropy - targetEntropy;
-  const tooChaotic = deltaE > 0.08;
-  const tooFlat = deltaE < -0.08;
-
-  // --- anti-loop + rotación ---
-  const meta = s.memory.meta;
-  const lastPicked = meta.lastPickedKey;
-
-  // si repite top con frecuencia, incrementa stuck
-  const sameTop = !!(top && lastPicked && top.key === lastPicked);
-  const stuckCount = sameTop ? meta.stuckCount + 1 : Math.max(0, meta.stuckCount - 1);
-
-  // reglas:
-  // - en caos: suspender dominantes si repiten
-  // - en plano: conservar (hold) y NO suspender, pero reducir rotación para consolidar
-  let anti: TorDecision["anti"] = null;
-
-  let pick: MemoryHit | null = top;
-
-  if (tooChaotic) {
-    // si hay demasiado ruido, forzamos “release”: rotación hacia 2º/3º y cortamos loops
-    anti = stuckCount >= 2 ? "break" : "silence";
-
-    if (hits.length >= 2 && sameTop) {
-      pick = hits[1] || pick;
-    } else if (hits.length >= 3 && stuckCount >= 3) {
-      pick = hits[2] || pick;
-    }
-  } else if (tooFlat) {
-    // si hay poca entropía, conservar para construir hash (hold)
-    anti = sameTop && stuckCount >= 3 ? "silence" : null;
-    // pick = top (conservador)
-  } else {
-    // zona sana: si repite demasiado, rotación ligera
-    if (sameTop && stuckCount >= 3 && hits.length >= 2) {
-      pick = hits[1];
-      anti = "silence";
-    }
+  // si no hay top, “conservar” (no tocar)
+  if (!top) {
+    return {
+      ...s,
+      memory: {
+        ...s.memory,
+        topics,
+        meta: { ...meta, events }
+      }
+    };
   }
 
-  // --- Aplicar “suspensión” (no borrar) ---
-  // Suspender SOLO cuando hay caos + repetición (monopolio patológico)
-  const topics = { ...s.memory.topics };
-  const events: TorEvent[] = [...meta.events];
-  const topHistory = [...meta.topHistory];
+  // entropía simple: más hits + más diversidad (aprox)
+  const sumW = hits.reduce((acc, h) => acc + (h.w || 0), 0) || 1;
+  const dominance = clamp01((top.w || 0) / sumW);
+  const entropy = clamp01((hits.length / 10) * (1 - dominance));
 
-  if (tooChaotic && sameTop && top) {
-    const t0 = topics[top.key];
-    if (t0) {
-      // suspensión proporcional a caos (más entropía => más tiempo)
-      const ttl = 12000 + Math.round(entropy * 24000); // 12..36s
-      const until = Math.max(t0.suspendedUntil || 0, now + ttl);
-      topics[top.key] = { ...t0, suspendedUntil: until };
+  // stuck detection
+  const sameAsLast = meta.lastPickedKey === top.key;
+  const stuckCount = sameAsLast ? meta.stuckCount + 1 : 0;
 
+  meta.lastPickedKey = top.key;
+  meta.stuckCount = stuckCount;
+
+  // topHistory (prestado)
+  meta.topHistory = (meta.topHistory || []).concat([
+    { t: now, key: top.key, token: borrowedTopToken || top.token || undefined, domain: top.domain }
+  ]).slice(-160);
+
+  // regla base: si muy repetido, suspendemos top; si hay poca entropía, no.
+  const lowEntropy = entropy < 0.18 && hits.length <= 3;
+  const highDominance = dominance > 0.62;
+
+  // cuánto suspender (ms)
+  const baseSuspend = 25_000; // 25s
+  const suspendMs = Math.round(baseSuspend * (1 + stuckCount * 0.55 + dominance));
+
+  // activar liberaciones (si ya pasó el tiempo)
+  for (const [k, v] of Object.entries(topics)) {
+    if (v.suspendedUntil > 0 && v.suspendedUntil <= now) {
+      topics[k] = { ...v, suspendedUntil: 0 };
       events.push({
         t: now,
         mode,
-        action: "suspend",
-        token: top.token,
-        key: top.key,
-        domain: top.domain,
-        causes: [top.key],
-        effects: [`suspendedUntil=${until}`, `entropy=${entropy.toFixed(2)}`],
-        suspended: true
+        action: "activate",
+        key: k,
+        domain: v.domain,
+        causes: [],
+        effects: ["suspendedUntil=0"],
+        suspended: false
       });
     }
   }
 
-  // Reactivar cuando hay poca entropía (conservar): reducimos suspensión aceleradamente
-  if (tooFlat) {
-    for (const [k, t] of Object.entries(topics)) {
-      if (t.suspendedUntil > 0 && t.suspendedUntil > now) {
-        const shorten = 8000; // reactiva antes
-        const newUntil = Math.max(0, t.suspendedUntil - shorten);
-        topics[k] = { ...t, suspendedUntil: newUntil };
+  // decisión TOR
+  let action: TorEvent["action"] = "hash";
+  const causes: string[] = [top.key];
+  const effects: string[] = [
+    `entropy=${entropy.toFixed(2)}`,
+    `dominance=${dominance.toFixed(2)}`,
+    `stuck=${stuckCount}`
+  ];
+
+  // tender al contrario:
+  // - si alto dominio/repetición -> suelta (suspend)
+  // - si baja entropía -> conserva (hold)
+  if (lowEntropy) {
+    action = "hold";
+    effects.push("homeostasis=conserve");
+  } else if (stuckCount >= 2 || (highDominance && hits.length >= 4)) {
+    action = "suspend";
+    const v = topics[top.key];
+    if (v) {
+      topics[top.key] = { ...v, suspendedUntil: now + suspendMs };
+      effects.push(`suspendedUntil+=${suspendMs}ms`);
+
+      // si hay segundo, lo “favorecemos” un poco sin inflarlo
+      if (second?.key && topics[second.key]) {
+        const vv = topics[second.key];
+        topics[second.key] = { ...vv, w: Math.min(1, vv.w + 0.03), last: now };
+        causes.push(second.key);
+        effects.push("promote=second+0.03");
       }
     }
-    events.push({
-      t: now,
-      mode,
-      action: "activate",
-      domain: "meta",
-      causes: [],
-      effects: ["reactivation-pass"],
-      suspended: false
-    });
+  } else {
+    action = "hash";
+    effects.push("homeostasis=neutral");
   }
 
-  // --- Decay adaptativo (conservar vs soltar) ---
-  // si caos: decay más agresivo para desprender; si plano: decay suave
-  const decay = tooChaotic ? 0.035 : tooFlat ? 0.010 : 0.020;
-
-  for (const [k, t] of Object.entries(topics)) {
-    const age = Math.max(0, now - (t.last || now));
-    const ageFactor = clamp01(age / 120000); // 2min
-    const d = decay * (0.35 + 0.65 * ageFactor);
-
-    // “pierde relevancia lo que se recuerda”:
-    // si fue pick recientemente, aplicamos un decay extra leve (anti-apego a lo recordado)
-    const pickedRecently = pick && k === pick.key && age < 45000;
-    const extra = pickedRecently ? 0.010 : 0;
-
-    const w2 = clamp01(t.w - d - extra);
-    topics[k] = { ...t, w: w2 };
-  }
-
-  // --- Registrar decisión causal (hash/nohash, hold/release) ---
-  const hold = tooFlat ? true : tooChaotic ? false : (coherence < 0.42 ? true : false);
-
-  const action: TorEvent["action"] = hold ? "hold" : "release";
   events.push({
     t: now,
     mode,
     action,
-    token: pick?.token,
-    key: pick?.key,
-    domain: pick?.domain || "meta",
-    causes: hits.slice(0, 4).map((h) => h.key),
-    effects: [
-      `entropy=${entropy.toFixed(2)}`,
-      `coherence=${coherence.toFixed(2)}`,
-      `anti=${anti || "none"}`,
-      `pick=${pick?.key || "none"}`
-    ]
+    token: borrowedTopToken || top.token || undefined,
+    key: top.key,
+    domain: top.domain,
+    causes,
+    effects,
+    suspended: action === "suspend"
   });
 
-  // --- Historia top ---
-  if (pick) {
-    topHistory.push({ t: now, key: pick.key, token: pick.token, domain: pick.domain });
-    while (topHistory.length > 32) topHistory.shift();
-  }
-
-  // meta update
-  const newMeta = {
-    ...meta,
-    stuckCount,
-    lastPickedKey: pick?.key || null,
-    topHistory,
-    events: events.slice(-220) // cap
-  };
-
-  const nextState: AUHashState = {
+  return {
     ...s,
-    t: now,
     memory: {
       ...s.memory,
       topics,
-      meta: newMeta
+      meta: {
+        ...meta,
+        events
+      }
     }
   };
-
-  // Estética derivada (no fija):
-  // complexity: sube con turns, y también con entropía moderada
-  const complexity = clamp01((Math.log2(2 + turns) / 6) * 0.55 + entropy * 0.45);
-  // beauty: sube cuando hay control (coherence) y no hay caos extremo
-  const beauty = clamp01(coherence * 0.75 + (1 - entropy) * 0.25);
-
-  const reason = tooChaotic
-    ? "too_chaotic→shed"
-    : tooFlat
-      ? "too_flat→conserve"
-      : "balanced";
-
-  const decision: TorDecision = {
-    hold,
-    anti,
-    entropy,
-    coherence,
-    pick,
-    complexity,
-    beauty,
-    reason
-  };
-
-  // recomputar hits (porque hemos decaído/suspendido)
-  // (simple: el route volverá a llamar queryMemory si quiere, pero lo dejamos opcional)
-  return { state: nextState, decision, hits };
 }

@@ -47,22 +47,26 @@ export async function POST(req: NextRequest) {
     session.chain = Array.isArray(session.chain) ? session.chain : [];
     session.chain.push(input);
 
-    // ingest
+    /* 1️⃣ INGEST */
     session.memory = ingestText(session.memory, input, "user", session.lang);
 
-    // hits
+    /* 2️⃣ HITS */
     let hits: MemoryHit[] = queryMemory(session.memory, 10);
 
-    // TOR
-    const tor = applyTor("wancko", session.memory, hits, session.turns);
-    session.memory = tor.state;
+    /* 3️⃣ TOR */
+    session.memory = applyTor(
+      session.memory,
+      "wancko",
+      hits,
+      hits[0]?.token
+    );
 
-    // (opcional) refrescar hits tras TOR si quieres más precisión:
+    /* 4️⃣ REFRESH HITS */
     hits = queryMemory(session.memory, 10);
 
-    const top = tor.decision.pick || hits[0] || null;
+    const top = hits[0] || null;
 
-    // output
+    /* 5️⃣ OUTPUT */
     let output: string | null = null;
 
     if (top) {
@@ -75,22 +79,27 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // silencio estratégico (TOR puede sugerirlo con anti=silence)
-    if (!output || tor.decision.anti === "silence") {
+    /* 6️⃣ SILENCE */
+    if (!output) {
       session.silenceCount += 1;
-      if (session.lang === "ca") output = "Què falta perquè això sigui decidible, ara?";
-      else if (session.lang === "en") output = "What is missing for this to be decidable, now?";
-      else output = "¿Qué falta para que esto sea decidible, ahora?";
+
+      if (session.lang === "ca")
+        output = "Què falta perquè això sigui decidible, ara?";
+      else if (session.lang === "en")
+        output = "What is missing for this to be decidable, now?";
+      else
+        output = "¿Qué falta para que esto sea decidible, ahora?";
     }
 
+    /* 7️⃣ AU */
     const au = computeAU(
-      "wancko",
-      hits,
-      session.turns,
-      session.silenceCount,
-      tor.decision,
-      session.lang
-    );
+  "wancko",
+  hits,
+  session.turns,
+  session.silenceCount,
+  session.lang
+);
+
 
     return NextResponse.json({
       output,
@@ -100,6 +109,7 @@ export async function POST(req: NextRequest) {
       hai: null,
       baski: null
     });
+
   } catch (e) {
     console.error(e);
     return NextResponse.json({ error: "wancko error" }, { status: 500 });
