@@ -2,17 +2,17 @@
 import type { AUHashState, AUHashTopic, Lang, AUGlyph } from "./kernel";
 
 /* =========================================================
-   Types (exported)
+   Tipos públicos
 ========================================================= */
 
 export type MemoryHit = {
-  key: string;      // hash estable (k)
-  token: string;    // prestado (desde meta.topHistory), puede ser ""
-  domain: string;
+  key: string;          // clave estable (por ahora: token normalizado)
+  token: string;        // token humano (mismo que key por ahora)
   w: number;
   last: number;
-  suspendedUntil: number;
+  domain: string;
   phon: AUGlyph[];
+  suspended: boolean;
 };
 
 /* =========================================================
@@ -21,10 +21,6 @@ export type MemoryHit = {
 
 function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
-}
-
-function nowMs(): number {
-  return Date.now();
 }
 
 function normalizeTokens(t: string): string[] {
@@ -36,138 +32,85 @@ function normalizeTokens(t: string): string[] {
     .filter(Boolean);
 }
 
-/** hash determinista corto (clave interna) */
-export function hashKey(s: string): string {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
+/** Fonética AU provisional: convierte letras a glifos (1..26) */
+function phoneticAU(token: string): AUGlyph[] {
+  const out: AUGlyph[] = [];
+  for (const ch of token.toLowerCase()) {
+    const code = ch.codePointAt(0) ?? 0;
+    // a..z
+    if (code >= 97 && code <= 122) out.push(code - 96);
+    // áéíóúñç (aprox)
+    else if ("áàä".includes(ch)) out.push(1);
+    else if ("éèë".includes(ch)) out.push(5);
+    else if ("íìï".includes(ch)) out.push(9);
+    else if ("óòö".includes(ch)) out.push(15);
+    else if ("úùü".includes(ch)) out.push(21);
+    else if (ch === "ñ") out.push(14);
+    else if (ch === "ç") out.push(3);
   }
-  return "T" + (h >>> 0).toString(16);
+  return out.length ? out : [0];
 }
 
 /* =========================================================
-   “Stopwords” estructurales (no concepto)
+   Stopwords estructurales (NO conceptos)
 ========================================================= */
 
-const STOP = new Set<string>([
-  // ES
-  "hola", "como", "qué", "que", "por", "porqué", "porque", "donde", "dónde",
-  "yo", "tu", "tú", "el", "la", "los", "las", "un", "una", "de", "del", "y", "o",
-  "hoy", "ahora", "muy", "mucho", "muchas", "cosas",
-  "estoy", "estas", "estás", "eres", "soy", "ser", "hacer", "voy", "ire", "iré",
-
-  // CA
-  "com", "què", "que", "per", "perquè", "per", "on",
-  "avui", "ara", "molt", "moltes", "coses",
-  "estic", "estas", "estàs", "ets", "sóc", "ser", "fer", "vaig", "anire", "aniré",
-
-  // EN
-  "hello", "hi", "how", "what", "where", "why",
-  "i", "you", "the", "a", "an", "of", "to", "and", "or",
-  "today", "now", "very", "much",
-  "am", "are", "is", "be", "do", "go"
+const STOPWORDS = new Set([
+  // saludos / muletillas
+  "hola", "hey", "buenas", "bon", "bones", "vale", "ok",
+  // copula / auxiliar ultra-frecuente
+  "estas", "estás", "estoy", "eres", "soy", "ser", "estar",
+  // pronombres / artículos / conectores
+  "yo", "tu", "tú", "el", "la", "los", "las", "un", "una", "unos", "unas",
+  "a", "de", "del", "al", "que", "y", "o", "en", "por", "para", "con", "sin",
+  "como", "com", "què", "que", "porque", "porquè", "perquè",
 ]);
 
-function isStructural(tok: string): boolean {
-  if (!tok) return true;
-  if (tok.length < 3) return true;
-  return STOP.has(tok);
-}
-
 /* =========================================================
-   Dominio semántico (humano)
+   Dominio semántico humano
 ========================================================= */
 
-export function inferDomain(token: string): string {
+function inferDomain(token: string): string {
   const t = token.toLowerCase();
 
-  // identidad / agente
-  if (["identidad", "yo", "qui", "quien", "who", "self"].includes(t)) return "identidad";
+  // identidad / agencia
+  if (["identidad", "quien", "qui", "persona", "yo", "ego"].includes(t)) return "identidad";
 
-  // memoria / tiempo
-  if (["recuerdo", "memoria", "pasado", "antes", "ayer", "record", "memory"].includes(t)) return "memoria";
+  // memoria
+  if (["recuerdo", "record", "memoria", "pasado", "ahir", "ayer"].includes(t)) return "memoria";
 
   // estructura / sistema
-  if (["estructura", "sistema", "orden", "regla", "norma", "model", "system"].includes(t)) return "estructura";
+  if (["estructura", "sistema", "orden", "regla", "norma"].includes(t)) return "estructura";
 
-  // lugar / orientación
-  if (["casa", "hogar", "mercat", "mercado", "platja", "playa", "muntanya", "montaña", "ciudad", "calle"].includes(t)) return "lugar";
+  // impulso / deseo
+  if (["gana", "ganas", "hambre", "set", "sed", "deseo", "miedo"].includes(t)) return "impulso";
 
   // cuerpo / fisiología
-  if (["cuerpo", "cos", "menjar", "menjaré", "menjare", "comer", "comeré", "calamars", "calamares"].includes(t)) return "cuerpo";
+  if (["cuerpo", "dolor", "calamars", "calamares", "menjar", "menjaré", "menjare", "comer", "comeré", "comere"].includes(t)) return "cuerpo";
 
-  // impulso / deseo / hambre
-  if (["gana", "hambre", "fam", "miedo", "por", "deseo", "urge", "ansiedad"].includes(t)) return "impulso";
+  // lugar
+  if (["casa", "mercat", "mercado", "platja", "playa", "muntanya", "montaña", "ciudad", "barcelona"].includes(t)) return "lugar";
 
-  // cosmos / verdad
-  if (["univers", "universo", "etern", "eterno", "verdad", "realidad"].includes(t)) return "cosmos";
+  // tiempo
+  if (["avui", "hoy", "demà", "mañana", "tarde", "noche", "ahir", "ayer"].includes(t)) return "tiempo";
+
+  // cosmos
+  if (["univers", "universo", "etern", "eterno", "cosmos", "infinito"].includes(t)) return "cosmos";
+
+  // acción / movimiento
+  if (["anar", "aniré", "anire", "iré", "ire", "voy", "mover", "salir"].includes(t)) return "acción";
 
   return "tema";
 }
 
 /* =========================================================
-   Fonética AU (glifos) — “letras = no-AU” → glifos numéricos
-   Idea: cada letra genera número (base), y transiciones generan “salir/entrar”.
-   Aquí lo mantenemos simple y estable (pero extensible).
-========================================================= */
-
-/** mapa base por carácter (0..31) */
-function glyphOfChar(ch: string): number {
-  const c = ch.toLowerCase();
-  // letras latinas básicas
-  if (c >= "a" && c <= "z") return (c.charCodeAt(0) - 97) % 32;
-  // vocales acentuadas / ñ / ç / l·l etc (aprox)
-  if ("áàäâ".includes(c)) return glyphOfChar("a");
-  if ("éèëê".includes(c)) return glyphOfChar("e");
-  if ("íïìî".includes(c)) return glyphOfChar("i");
-  if ("óòöô".includes(c)) return glyphOfChar("o");
-  if ("úüùû".includes(c)) return glyphOfChar("u");
-  if (c === "ñ") return 27;
-  if (c === "ç") return 28;
-  return 31; // “otro”
-}
-
-/**
- * phoneticAU:
- * - produce glifos por transiciones: enter(letter), exit(letter)
- * - encode: g = base(letter) y g' = 32 + base(letter) (salida)
- */
-export function phoneticAU(token: string): AUGlyph[] {
-  const chars = Array.from((token || "").trim());
-  if (chars.length === 0) return [];
-
-  const out: number[] = [];
-  for (let i = 0; i < chars.length; i++) {
-    const g = glyphOfChar(chars[i]);
-    // entrar
-    out.push(g);
-    // salir (marca inversa)
-    out.push(32 + g);
-  }
-
-  // compresión simple: corta longitud pero preserva jerarquía
-  return out.slice(0, 24);
-}
-
-/* =========================================================
-   Estado v2
+   Estado
 ========================================================= */
 
 export function ensureState(prev?: AUHashState | null): AUHashState {
-  const now = nowMs();
+  if (prev && typeof prev === "object" && prev.memory && prev.v === 2) return prev;
 
-  if (
-    prev &&
-    typeof prev === "object" &&
-    prev.v === 2 &&
-    prev.memory &&
-    prev.memory.topics &&
-    prev.memory.meta &&
-    Array.isArray(prev.memory.meta.events)
-  ) {
-    return prev;
-  }
+  const now = Date.now();
 
   return {
     v: 2,
@@ -180,17 +123,14 @@ export function ensureState(prev?: AUHashState | null): AUHashState {
         stuckCount: 0,
         lastPickedKey: null,
         topHistory: [],
-        events: []
-      }
-    }
+        events: [],
+      },
+    },
   };
 }
 
 /* =========================================================
-   Ingesta (no guarda “palabra” como verdad)
-   - topics por key estable (hash)
-   - phon/g glifos
-   - token humano SOLO como prestado en meta.topHistory/events
+   Ingesta
 ========================================================= */
 
 export function ingestText(
@@ -200,48 +140,48 @@ export function ingestText(
   langHint?: Lang
 ): AUHashState {
   const s = ensureState(prev);
-  const now = nowMs();
+  const now = Date.now();
 
-  const raw = (text || "").trim();
-  if (!raw) return { ...s, t: now };
+  const trimmed = (text || "").trim();
+  if (!trimmed) return { ...s, t: now };
 
-  // votos de idioma (ligero)
-  const langVotes = { ...s.memory.langVotes };
-  if (langHint) langVotes[langHint] = (langVotes[langHint] || 0) + (role === "user" ? 2 : 1);
+  const tokens = normalizeTokens(trimmed);
+  const topics = { ...(s.memory.topics || {}) };
 
-  const tokens = normalizeTokens(raw);
+  // voto de idioma (suave)
+  const lv = { ...(s.memory.langVotes || { es: 0, ca: 0, en: 0 }) };
+  if (langHint) lv[langHint] = (lv[langHint] || 0) + 1;
 
-  const topics: Record<string, AUHashTopic> = { ...s.memory.topics };
+  const deltaBase = role === "user" ? 0.08 : 0.04;
 
-  // delta por rol
-  const delta = role === "user" ? 0.08 : 0.04;
+  for (const raw of tokens.slice(0, 14)) {
+    const key = raw.trim();
+    if (!key) continue;
+    if (key.length < 3) continue;
+    if (STOPWORDS.has(key)) continue;
 
-  // tomamos candidatos no estructurales
-  const candidates = tokens.filter((x) => !isStructural(x)).slice(0, 12);
-
-  for (const token of candidates) {
-    const key = hashKey(token);
     const prevTopic = topics[key];
-
-    // si está suspendido, igual puede “rozarse” pero con poco peso
-    const suspendedUntil = prevTopic?.suspendedUntil ?? 0;
-    const isSuspended = suspendedUntil > now;
-
     const wPrev = prevTopic?.w ?? 0;
-    const wNew = clamp01(wPrev + (isSuspended ? delta * 0.25 : delta));
 
-    const domain = prevTopic?.domain || inferDomain(token);
-    const phon = prevTopic?.phon?.length ? prevTopic.phon : phoneticAU(token);
-    const g = prevTopic?.g?.length ? prevTopic.g : []; // reservado
+    // si está suspendido, igual puede “rozar” pero menos
+    const suspended = (prevTopic?.suspendedUntil ?? 0) > now;
+    const delta = suspended ? deltaBase * 0.25 : deltaBase;
 
-    topics[key] = {
+    const wNew = clamp01(wPrev + delta);
+
+    const domain = prevTopic?.domain ?? inferDomain(key);
+    const phon = prevTopic?.phon ?? phoneticAU(key);
+
+    const topic: AUHashTopic = {
       w: wNew,
       last: now,
       phon,
       domain,
-      g,
-      suspendedUntil
+      g: prevTopic?.g ?? [],
+      suspendedUntil: prevTopic?.suspendedUntil ?? 0,
     };
+
+    topics[key] = topic;
   }
 
   return {
@@ -250,49 +190,40 @@ export function ingestText(
     memory: {
       ...s.memory,
       topics,
-      langVotes,
-      meta: {
-        ...s.memory.meta
-      }
-    }
+      langVotes: lv,
+    },
   };
 }
 
 /* =========================================================
-   Query (devuelve token prestado mirando topHistory)
-   - NO expone el hash como texto al usuario
+   Consulta memoria (top hits)
 ========================================================= */
-
-function borrowedTokenForKey(s: AUHashState, key: string): string {
-  // buscamos el más reciente en topHistory
-  for (let i = s.memory.meta.topHistory.length - 1; i >= 0; i--) {
-    const h = s.memory.meta.topHistory[i];
-    if (h.key === key && h.token) return h.token;
-  }
-  return "";
-}
 
 export function queryMemory(
   state: AUHashState | null | undefined,
-  topN: number = 6
+  topN: number = 8
 ): MemoryHit[] {
   const s = ensureState(state);
-  const now = nowMs();
+  const now = Date.now();
 
   const entries = Object.entries(s.memory.topics || {});
+  entries.sort((a, b) => (b[1]?.w ?? 0) - (a[1]?.w ?? 0));
 
-  // filtra suspendidos para “competición”
-  const active = entries.filter(([, v]) => (v?.suspendedUntil ?? 0) <= now);
+  const out: MemoryHit[] = [];
 
-  active.sort((a, b) => (b[1]?.w ?? 0) - (a[1]?.w ?? 0));
+  for (const [k, v] of entries) {
+    const suspended = (v.suspendedUntil ?? 0) > now;
+    out.push({
+      key: k,
+      token: k,
+      w: v.w ?? 0,
+      last: v.last ?? 0,
+      domain: v.domain ?? inferDomain(k),
+      phon: v.phon ?? phoneticAU(k),
+      suspended,
+    });
+    if (out.length >= topN) break;
+  }
 
-  return active.slice(0, topN).map(([key, v]) => ({
-    key,
-    token: borrowedTokenForKey(s, key),
-    domain: v.domain,
-    w: v.w,
-    last: v.last,
-    suspendedUntil: v.suspendedUntil,
-    phon: v.phon
-  }));
+  return out;
 }

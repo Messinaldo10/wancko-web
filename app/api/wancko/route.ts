@@ -29,7 +29,7 @@ function newSession(lang: Lang): WanckoSession {
     lang,
     chain: [],
     silenceCount: 0,
-    memory: ensureState(null)
+    memory: ensureState(null),
   };
 }
 
@@ -47,59 +47,47 @@ export async function POST(req: NextRequest) {
     session.chain = Array.isArray(session.chain) ? session.chain : [];
     session.chain.push(input);
 
-    /* 1️⃣ INGEST */
+    // 1) ingest
     session.memory = ingestText(session.memory, input, "user", session.lang);
 
-    /* 2️⃣ HITS */
+    // 2) hits
     let hits: MemoryHit[] = queryMemory(session.memory, 10);
 
-    /* 3️⃣ TOR */
-    session.memory = applyTor(
-      session.memory,
-      "wancko",
-      hits,
-      hits[0]?.token
-    );
+    // 3) TOR
+    const tor = applyTor(session.memory, "wancko", hits, hits[0]?.token);
+    session.memory = tor.state;
 
-    /* 4️⃣ REFRESH HITS */
+    // 4) refrescar hits (tras holds/suspends)
     hits = queryMemory(session.memory, 10);
 
-    const top = hits[0] || null;
+    const top = tor.decision.pick || hits[0] || null;
 
-    /* 5️⃣ OUTPUT */
+    // 5) output
     let output: string | null = null;
 
     if (top) {
-      if (session.lang === "ca") {
-        output = `He detectat coherència en ${formatHit(session.lang, top)}.`;
-      } else if (session.lang === "en") {
-        output = `I detect coherence around ${formatHit(session.lang, top)}.`;
-      } else {
-        output = `He detectado coherencia en ${formatHit(session.lang, top)}.`;
-      }
+      if (session.lang === "ca") output = `He detectat coherència en ${formatHit(session.lang, top)}.`;
+      else if (session.lang === "en") output = `I detect coherence around ${formatHit(session.lang, top)}.`;
+      else output = `He detectado coherencia en ${formatHit(session.lang, top)}.`;
     }
 
-    /* 6️⃣ SILENCE */
-    if (!output) {
+    // 6) silencio estratégico (solo si TOR lo pide o no hay top real)
+    if (!output || tor.decision.anti === "silence") {
       session.silenceCount += 1;
-
-      if (session.lang === "ca")
-        output = "Què falta perquè això sigui decidible, ara?";
-      else if (session.lang === "en")
-        output = "What is missing for this to be decidable, now?";
-      else
-        output = "¿Qué falta para que esto sea decidible, ahora?";
+      if (session.lang === "ca") output = "Què falta perquè això sigui decidible, ara?";
+      else if (session.lang === "en") output = "What is missing for this to be decidable, now?";
+      else output = "¿Qué falta para que esto sea decidible, ahora?";
     }
 
-    /* 7️⃣ AU */
+    // 7) AU
     const au = computeAU(
-  "wancko",
-  hits,
-  session.turns,
-  session.silenceCount,
-  session.lang
-);
-
+      "wancko",
+      hits,
+      session.turns,
+      session.silenceCount,
+      tor.decision,
+      session.lang
+    );
 
     return NextResponse.json({
       output,
@@ -107,9 +95,8 @@ export async function POST(req: NextRequest) {
       au,
       cert: null,
       hai: null,
-      baski: null
+      baski: null,
     });
-
   } catch (e) {
     console.error(e);
     return NextResponse.json({ error: "wancko error" }, { status: 500 });

@@ -6,144 +6,119 @@ function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
 }
 
-function nowMs(): number {
-  return Date.now();
-}
+type TorDecision = {
+  pick: MemoryHit | null;
+  anti: null | "silence" | "break";
+  reason: string;
+  effects: string[];
+};
 
-/**
- * TOR homeostasis:
- * - Si el top se repite demasiado -> “suspend” temporal del key dominante.
- * - Si hay poca entropía (pocos hits) -> conserva (no suspende).
- * - Si hay mucha entropía (muchos hits + dominancia alta) -> desprende (suspende top o rota).
- *
- * No borra nada: solo ajusta suspendedUntil y registra eventos.
- */
 export function applyTor(
-  prev: AUHashState,
+  state: AUHashState,
   mode: "wancko" | "hwancko",
   hits: MemoryHit[],
-  borrowedTopToken?: string
-): AUHashState {
-  const s: AUHashState = prev;
-  const now = nowMs();
+  borrowedToken?: string
+): { state: AUHashState; decision: TorDecision } {
+  const s = state;
+  const now = Date.now();
 
+  const meta = s.memory.meta;
   const topics = { ...s.memory.topics };
-  const meta = { ...s.memory.meta };
-  const events: TorEvent[] = meta.events.slice(-180); // cap
 
-  const top = hits[0];
-  const second = hits[1];
+  const top = hits[0] || null;
+  const second = hits[1] || null;
 
-  // si no hay top, “conservar” (no tocar)
-  if (!top) {
-    return {
-      ...s,
-      memory: {
-        ...s.memory,
-        topics,
-        meta: { ...meta, events }
-      }
-    };
+  // --- métricas simples
+  const topW = top?.w ?? 0;
+  const sumW = hits.slice(0, 6).reduce((acc, h) => acc + (h.w || 0), 0) || 1;
+  const dominance = clamp01(topW / sumW);
+
+  const lastPicked = meta.lastPickedKey;
+  const sameAsLast = !!(top && lastPicked && top.key === lastPicked);
+
+  // stuckCount: sube si repetimos top en alta dominancia
+  let stuckCount = meta.stuckCount ?? 0;
+  if (sameAsLast && dominance > 0.34) stuckCount += 1;
+  else stuckCount = Math.max(0, stuckCount - 1);
+
+  // --- decisión base
+  let pick: MemoryHit | null = top;
+  let anti: TorDecision["anti"] = null;
+  let reason = "base";
+  const effects: string[] = [];
+
+  // (1) si casi no hay material → silencio
+  if (!top || topW < 0.10) {
+    pick = null;
+    anti = "silence";
+    reason = "low_signal";
+    effects.push("anti=silence");
   }
 
-  // entropía simple: más hits + más diversidad (aprox)
-  const sumW = hits.reduce((acc, h) => acc + (h.w || 0), 0) || 1;
-  const dominance = clamp01((top.w || 0) / sumW);
-  const entropy = clamp01((hits.length / 10) * (1 - dominance));
+  // (2) si estamos atascados → rota al 2º (si existe y no está suspendido)
+  if (!anti && stuckCount >= 2 && second && !second.suspended) {
+    pick = second;
+    reason = "rotate_second";
+    effects.push("rotate=second");
+  }
 
-  // stuck detection
-  const sameAsLast = meta.lastPickedKey === top.key;
-  const stuckCount = sameAsLast ? meta.stuckCount + 1 : 0;
-
-  meta.lastPickedKey = top.key;
-  meta.stuckCount = stuckCount;
-
-  // topHistory (prestado)
-  meta.topHistory = (meta.topHistory || []).concat([
-    { t: now, key: top.key, token: borrowedTopToken || top.token || undefined, domain: top.domain }
-  ]).slice(-160);
-
-  // regla base: si muy repetido, suspendemos top; si hay poca entropía, no.
-  const lowEntropy = entropy < 0.18 && hits.length <= 3;
-  const highDominance = dominance > 0.62;
-
-  // cuánto suspender (ms)
-  const baseSuspend = 25_000; // 25s
-  const suspendMs = Math.round(baseSuspend * (1 + stuckCount * 0.55 + dominance));
-
-  // activar liberaciones (si ya pasó el tiempo)
-  for (const [k, v] of Object.entries(topics)) {
-    if (v.suspendedUntil > 0 && v.suspendedUntil <= now) {
-      topics[k] = { ...v, suspendedUntil: 0 };
-      events.push({
-        t: now,
-        mode,
-        action: "activate",
-        key: k,
-        domain: v.domain,
-        causes: [],
-        effects: ["suspendedUntil=0"],
-        suspended: false
-      });
+  // (3) homeostasis: si hay demasiada dominancia prolongada, “hold” top por un rato
+  //     (no borra; suspende la competición)
+  if (!anti && stuckCount >= 4 && top) {
+    const holdMs = 90_000; // 90s (ajustable)
+    const t = topics[top.key];
+    if (t) {
+      topics[top.key] = { ...t, suspendedUntil: Math.max(t.suspendedUntil || 0, now + holdMs) };
+      effects.push(`hold=${top.key}`);
+      reason = "hold_dominant";
+      // tras hold, elige siguiente disponible
+      const next = hits.find(h => h.key !== top.key && !h.suspended) || null;
+      pick = next;
     }
   }
 
-  // decisión TOR
-  let action: TorEvent["action"] = "hash";
-  const causes: string[] = [top.key];
-  const effects: string[] = [
-    `entropy=${entropy.toFixed(2)}`,
-    `dominance=${dominance.toFixed(2)}`,
-    `stuck=${stuckCount}`
-  ];
-
-  // tender al contrario:
-  // - si alto dominio/repetición -> suelta (suspend)
-  // - si baja entropía -> conserva (hold)
-  if (lowEntropy) {
-    action = "hold";
-    effects.push("homeostasis=conserve");
-  } else if (stuckCount >= 2 || (highDominance && hits.length >= 4)) {
-    action = "suspend";
-    const v = topics[top.key];
-    if (v) {
-      topics[top.key] = { ...v, suspendedUntil: now + suspendMs };
-      effects.push(`suspendedUntil+=${suspendMs}ms`);
-
-      // si hay segundo, lo “favorecemos” un poco sin inflarlo
-      if (second?.key && topics[second.key]) {
-        const vv = topics[second.key];
-        topics[second.key] = { ...vv, w: Math.min(1, vv.w + 0.03), last: now };
-        causes.push(second.key);
-        effects.push("promote=second+0.03");
-      }
-    }
-  } else {
-    action = "hash";
-    effects.push("homeostasis=neutral");
-  }
-
-  events.push({
+  // --- registrar evento TOR (solo lógica/cadena, NO respuesta)
+  const ev: TorEvent = {
     t: now,
     mode,
-    action,
-    token: borrowedTopToken || top.token || undefined,
-    key: top.key,
-    domain: top.domain,
-    causes,
-    effects,
-    suspended: action === "suspend"
-  });
+    action: anti === "silence" ? "hold" : "hash",
+    token: borrowedToken,
+    key: pick?.key,
+    domain: pick?.domain || "tema",
+    causes: [
+      top ? `top=${top.key}` : "top=none",
+      `dominance=${dominance.toFixed(2)}`,
+      `stuck=${stuckCount}`,
+    ],
+    effects: effects.length ? effects : ["none"],
+    suspended: false,
+  };
 
-  return {
+  const topHistory = Array.isArray(meta.topHistory) ? meta.topHistory : [];
+  if (pick) {
+    topHistory.push({ t: now, key: pick.key, token: pick.token, domain: pick.domain });
+  }
+
+  const newMeta = {
+    ...meta,
+    stuckCount,
+    lastPickedKey: pick?.key ?? meta.lastPickedKey ?? null,
+    topHistory: topHistory.slice(-40),
+    events: [...(meta.events || []), ev].slice(-120),
+  };
+
+  const newState: AUHashState = {
     ...s,
+    t: now,
     memory: {
       ...s.memory,
       topics,
-      meta: {
-        ...meta,
-        events
-      }
-    }
+      meta: newMeta,
+    },
+  };
+
+  return {
+    state: newState,
+    decision: { pick, anti, reason, effects },
   };
 }
