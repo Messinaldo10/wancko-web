@@ -5,15 +5,16 @@ import type { AUHashState, Lang } from "../../../lib/auhash/kernel";
 import type { MemoryHit } from "../../../lib/auhash/minimal";
 import { applyTor } from "../../../lib/auhash/tor";
 import { computeAU, formatHit } from "../../../lib/auhash/engine";
+import { evaluateAU } from "../../../lib/auhash/server-au";
+import { computeFrameAndOps } from "../../../lib/auhash/frame";
+import { primaryMetricsFromKey } from "../../../lib/auhash/mod999999";
 
 type HWanckoSession = {
   id: string;
   turns: number;
   lang: Lang;
-  chain: string[];
   silenceCount: number;
   memory: AUHashState;
-  archetype?: string;
 };
 
 function detectLang(text: string, accept?: string): Lang {
@@ -28,10 +29,8 @@ function newSession(lang: Lang): HWanckoSession {
     id: crypto.randomUUID(),
     turns: 0,
     lang,
-    chain: [],
     silenceCount: 0,
     memory: ensureState(null),
-    archetype: "estoic",
   };
 }
 
@@ -52,40 +51,80 @@ export async function POST(req: NextRequest) {
     if (!session.lang) session.lang = lang;
 
     session.turns += 1;
-    session.chain = Array.isArray(session.chain) ? session.chain : [];
-    session.chain.push(input);
-    session.archetype = body?.archetype || session.archetype || "estoic";
 
-    // 1) ingest
+    /* =========================================================
+       1️⃣ INGEST
+    ========================================================= */
+
     session.memory = ingestText(session.memory, input, "user", session.lang);
 
-    // 2) hits
+    /* =========================================================
+       2️⃣ HITS
+    ========================================================= */
+
     let hits: MemoryHit[] = queryMemory(session.memory, 10);
+    const top = hits[0] || null;
 
-    // 3) TOR (mismo regulador)
-    const tor = applyTor(session.memory, "hwancko", hits, hits[0]?.token);
-    session.memory = tor.state;
+    /* =========================================================
+       3️⃣ FRAME + PRIMARY METRICS
+    ========================================================= */
 
-    // 4) refrescar hits
+    const report = evaluateAU(session.memory, hits, session.turns, session.silenceCount);
+
+    const framePack = computeFrameAndOps({
+      wReport: null,
+      hReport: report,
+      wTurns: 0,
+      hTurns: session.turns,
+      hTopKey: top?.key || top?.token || null,
+    });
+
+    const ctx = {
+      metrics: framePack.metrics,
+      ops: framePack.ops,
+    };
+
+    /* =========================================================
+       4️⃣ APPLY TOR
+    ========================================================= */
+
+    session.memory = applyTor(
+      session.memory,
+      "hwancko",
+      hits,
+      top?.token,
+      ctx
+    );
+
+    /* =========================================================
+       5️⃣ REFRESH HITS
+    ========================================================= */
+
     hits = queryMemory(session.memory, 10);
+    const finalTop = hits[0] || null;
 
-    const top = tor.decision.pick || hits[0] || null;
+    /* =========================================================
+       6️⃣ OUTPUT (ESPEJO)
+    ========================================================= */
 
-    // 5) output espejo
     let output: string | null = null;
 
-    if (top) {
+    if (finalTop) {
       output = msg(
         session.lang,
-        `Em quedo amb ${formatHit(session.lang, top)}. Quina part és mirall i quina és motor?`,
-        `I stay with ${formatHit(session.lang, top)}. Which part is mirror and which is engine?`,
-        `Me quedo con ${formatHit(session.lang, top)}. ¿Qué parte es espejo y cuál es motor?`
+        `Em quedo amb ${formatHit(session.lang, finalTop)}. Quina part és mirall i quina és motor?`,
+        `I stay with ${formatHit(session.lang, finalTop)}. Which part is mirror and which is engine?`,
+        `Me quedo con ${formatHit(session.lang, finalTop)}. ¿Qué parte es espejo y cuál es motor?`
       );
     }
 
-    // 6) silencio (solo si TOR lo pide o no hay top)
-    if (!output || tor.decision.anti === "silence") {
+    if (
+      !output ||
+      framePack.metrics.polarity_gap > 0.75 ||
+      framePack.ops.duality > 0.75
+    ) {
       session.silenceCount += 1;
+
       output = msg(
         session.lang,
         "Què falta perquè això sigui decidible, ara?",
@@ -94,17 +133,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 7) AU
-    const au = computeAU(
-      "hwancko",
-      hits,
-      session.turns,
-      session.silenceCount,
-      tor.decision,
-      session.lang
-    );
+    /* =========================================================
+       7️⃣ AU VISUAL
+    ========================================================= */
 
-    return NextResponse.json({ output, session, au });
+    const au = computeAU(
+  "hwancko",
+  hits,
+  session.turns,
+  session.silenceCount,
+  session.lang
+);
+
+    return NextResponse.json({
+      output,
+      session,
+      au,
+      frame: framePack.frame,
+      ops: framePack.ops,
+      metrics: framePack.metrics,
+    });
   } catch (e) {
     console.error(e);
     return NextResponse.json({ error: "h-wancko error" }, { status: 500 });

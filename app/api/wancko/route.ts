@@ -5,12 +5,14 @@ import type { AUHashState, Lang } from "../../../lib/auhash/kernel";
 import type { MemoryHit } from "../../../lib/auhash/minimal";
 import { applyTor } from "../../../lib/auhash/tor";
 import { computeAU, formatHit } from "../../../lib/auhash/engine";
+import { evaluateAU } from "../../../lib/auhash/server-au";
+import { computeFrameAndOps } from "../../../lib/auhash/frame";
+import { primaryMetricsFromKey } from "../../../lib/auhash/mod999999";
 
 type WanckoSession = {
   id: string;
   turns: number;
   lang: Lang;
-  chain: string[];
   silenceCount: number;
   memory: AUHashState;
 };
@@ -27,7 +29,6 @@ function newSession(lang: Lang): WanckoSession {
     id: crypto.randomUUID(),
     turns: 0,
     lang,
-    chain: [],
     silenceCount: 0,
     memory: ensureState(null),
   };
@@ -44,58 +45,116 @@ export async function POST(req: NextRequest) {
     if (!session.lang) session.lang = lang;
 
     session.turns += 1;
-    session.chain = Array.isArray(session.chain) ? session.chain : [];
-    session.chain.push(input);
 
-    // 1) ingest
+    /* =========================================================
+       1️⃣ INGEST
+    ========================================================= */
+
     session.memory = ingestText(session.memory, input, "user", session.lang);
 
-    // 2) hits
+    /* =========================================================
+       2️⃣ HITS
+    ========================================================= */
+
     let hits: MemoryHit[] = queryMemory(session.memory, 10);
+    const top = hits[0] || null;
 
-    // 3) TOR
-    const tor = applyTor(session.memory, "wancko", hits, hits[0]?.token);
-    session.memory = tor.state;
+    /* =========================================================
+       3️⃣ FRAME + PRIMARY METRICS
+    ========================================================= */
 
-    // 4) refrescar hits (tras holds/suspends)
-    hits = queryMemory(session.memory, 10);
+    const report = evaluateAU(session.memory, hits, session.turns, session.silenceCount);
 
-    const top = tor.decision.pick || hits[0] || null;
+    const framePack = computeFrameAndOps({
+      wReport: report,
+      hReport: null,
+      wTurns: session.turns,
+      hTurns: 0,
+      wTopKey: top?.key || top?.token || null,
+    });
 
-    // 5) output
-    let output: string | null = null;
+    const primary = top
+      ? primaryMetricsFromKey(top.key || top.token)
+      : null;
 
-    if (top) {
-      if (session.lang === "ca") output = `He detectat coherència en ${formatHit(session.lang, top)}.`;
-      else if (session.lang === "en") output = `I detect coherence around ${formatHit(session.lang, top)}.`;
-      else output = `He detectado coherencia en ${formatHit(session.lang, top)}.`;
-    }
+    /* =========================================================
+       4️⃣ CONTEXTO TOR
+    ========================================================= */
 
-    // 6) silencio estratégico (solo si TOR lo pide o no hay top real)
-    if (!output || tor.decision.anti === "silence") {
-      session.silenceCount += 1;
-      if (session.lang === "ca") output = "Què falta perquè això sigui decidible, ara?";
-      else if (session.lang === "en") output = "What is missing for this to be decidable, now?";
-      else output = "¿Qué falta para que esto sea decidible, ahora?";
-    }
+    const ctx = {
+      metrics: {
+        dimensional_distance: framePack.metrics.dimensional_distance,
+        polarity_gap: framePack.metrics.polarity_gap,
+        cycle_conflict: framePack.metrics.cycle_conflict,
+      },
+      ops: framePack.ops,
+    };
 
-    // 7) AU
-    const au = computeAU(
+    session.memory = applyTor(
+      session.memory,
       "wancko",
       hits,
-      session.turns,
-      session.silenceCount,
-      tor.decision,
-      session.lang
+      top?.token,
+      ctx
     );
+
+    /* =========================================================
+       5️⃣ REFRESH HITS
+    ========================================================= */
+
+    hits = queryMemory(session.memory, 10);
+    const finalTop = hits[0] || null;
+
+    /* =========================================================
+       6️⃣ OUTPUT
+    ========================================================= */
+
+    let output: string | null = null;
+
+    if (finalTop) {
+      if (session.lang === "ca")
+        output = `He detectat coherència en ${formatHit(session.lang, finalTop)}.`;
+      else if (session.lang === "en")
+        output = `I detect coherence around ${formatHit(session.lang, finalTop)}.`;
+      else
+        output = `He detectado coherencia en ${formatHit(session.lang, finalTop)}.`;
+    }
+
+    // silencio estratégico según frame
+    if (
+      !output ||
+      framePack.metrics.dimensional_distance > 0.75 ||
+      framePack.ops.noise > 0.75
+    ) {
+      session.silenceCount += 1;
+
+      if (session.lang === "ca")
+        output = "Què falta perquè això sigui decidible, ara?";
+      else if (session.lang === "en")
+        output = "What is missing for this to be decidable, now?";
+      else
+        output = "¿Qué falta para que esto sea decidible, ahora?";
+    }
+
+    /* =========================================================
+       7️⃣ AU VISUAL
+    ========================================================= */
+
+const au = computeAU(
+  "wancko",
+  hits,
+  session.turns,
+  session.silenceCount,
+  session.lang
+);
 
     return NextResponse.json({
       output,
       session,
       au,
-      cert: null,
-      hai: null,
-      baski: null,
+      frame: framePack.frame,
+      ops: framePack.ops,
+      metrics: framePack.metrics,
     });
   } catch (e) {
     console.error(e);

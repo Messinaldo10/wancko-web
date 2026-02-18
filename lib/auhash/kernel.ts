@@ -1,4 +1,11 @@
 // lib/auhash/kernel.ts
+export type EntropicLevel = "1e6" | "1e12" | "1e18" | "1e36";
+
+export type EntropicFrame = {
+  level: EntropicLevel;
+};
+
+
 export type Lang = "es" | "ca" | "en";
 
 /** Un “glifo” mínimo (por ahora numérico) */
@@ -7,6 +14,7 @@ export type AUGlyph = number;
 /** Evento causal TOR: no se borra, se suspende/activa */
 export type TorEvent = {
   t: number;
+timestamp: number;
   mode: "wancko" | "hwancko";
   action: "hash" | "nohash" | "suspend" | "activate" | "release" | "hold";
   token?: string;       // prestado (solo para lectura humana, no es “verdad”)
@@ -54,4 +62,6 @@ export type AUHashState = {
   t0: number;
   t: number;
   memory: AUHashMemory;
+frame: EntropicFrame;
+
 };
