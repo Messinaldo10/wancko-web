@@ -1,12 +1,12 @@
 // lib/auhash/frame.ts
 import type { JuramentoReport, JuramentoVector } from "./server-au";
-import { primaryMetricsFromKey } from "./mod999999";
+import type { EntropicLevel } from "./kernel";
+import { primaryMetricsFromKeyUnified } from "./modular";
 
 /* =========================================================
    Types
 ========================================================= */
 
-import type { EntropicLevel } from "./kernel";
 export type AUFrameLevel = EntropicLevel;
 export type AUFramePerm = "1234" | "2143" | "3412" | "4321";
 export type AUFrameRole = "A" | "C" | "V" | "R";
@@ -137,11 +137,9 @@ export function computeFrameAndOps(args: {
   hReport?: JuramentoReport | null;
   wTurns: number;
   hTurns: number;
-  // para métricas primarias: le pasas key (top hit) desde route/juramento
   wTopKey?: string | null;
   hTopKey?: string | null;
 }): { frame: AUFrame; ops: AUFrameOps; metrics: AUFrameMetrics } {
-
   const wTurns = args.wTurns || 0;
   const hTurns = args.hTurns || 0;
   const turns = Math.max(wTurns, hTurns);
@@ -174,7 +172,7 @@ export function computeFrameAndOps(args: {
   const curvature = clamp01(0.55 * repetition + 0.25 * volatility + 0.20 * (1 - okScore));
 
   const levelIndex = levelToIndex(level);
-const levelBias = levelIndex / 3; // 0..1 normalizado
+  const levelBias = levelIndex / 3;
 
   const microExtremes = clamp01(Math.max(dominance, silenceRatio));
   const duality = clamp01(0.65 * Math.abs(levelBias - microExtremes) + 0.35 * Math.abs(d - okScore));
@@ -186,7 +184,6 @@ const levelBias = levelIndex / 3; // 0..1 normalizado
   const W1 = clamp01((okScore - 0.5) * 0.5 + (diversity - 0.3) * 0.2) - 0.5;
   const attach1 = clamp01((attachment - 0.5) * 0.6 - volatility * 0.2) - 0.5;
 
-  // vecDir
   const vecDir: JuramentoVector =
     dominance > 0.55 || attachment > 0.60
       ? "wancko"
@@ -197,18 +194,15 @@ const levelBias = levelIndex / 3; // 0..1 normalizado
   // perm base
   const { perm, reason: permReason } = choosePerm(vector, vecDir, okScore, silenceRatio, dominance);
 
-  // metrics primarias (si hay keys)
-  const wKey = args.wTopKey || "";
-  const hKey = args.hTopKey || "";
-
-  const wm = wKey ? primaryMetricsFromKey(wKey) : null;
-  const hm = hKey ? primaryMetricsFromKey(hKey) : null;
+  // metrics primarias desde keys
+  const wm = args.wTopKey ? primaryMetricsFromKeyUnified(args.wTopKey) : null;
+  const hm = args.hTopKey ? primaryMetricsFromKeyUnified(args.hTopKey) : null;
 
   const dimensional_distance = clamp01(mean([wm?.dimensional_distance ?? 0, hm?.dimensional_distance ?? 0]));
   const polarity_gap = clamp01(mean([wm?.polarity_gap ?? 0, hm?.polarity_gap ?? 0]));
   const cycle_conflict = clamp01(mean([wm?.cycle_conflict ?? 0, hm?.cycle_conflict ?? 0]));
 
-  // perm shift si hay conflicto
+  // perm dinámico si conflicto
   let dynamicPerm: AUFramePerm = perm;
   if (cycle_conflict > 0.6 || (curvature > 0.72 && okScore < 0.55)) {
     if (perm === "1234") dynamicPerm = "2143";

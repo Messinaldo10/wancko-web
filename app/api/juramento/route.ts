@@ -1,12 +1,18 @@
 // app/api/juramento/route.ts
+
 import { NextRequest, NextResponse } from "next/server";
 import type { AUHashState, Lang } from "../../../lib/auhash/kernel";
 import { queryMemory } from "../../../lib/auhash/minimal";
 import type { MemoryHit } from "../../../lib/auhash/minimal";
 import { computeAU } from "../../../lib/auhash/engine";
-import { evaluateAU, pickTurmiProfile, acceptanceImplication } from "../../../lib/auhash/server-au";
+import {
+  evaluateAU,
+  pickTurmiProfile,
+  acceptanceImplication,
+} from "../../../lib/auhash/server-au";
 import { applyTantraToDecision } from "../../../lib/auhash/tantra";
 import { computeFrameAndOps } from "../../../lib/auhash/frame";
+import { computeContext } from "../../../lib/auhash/context";
 
 type AnySession = {
   turns?: number;
@@ -15,12 +21,10 @@ type AnySession = {
   memory?: AUHashState;
 };
 
-function clamp01(x: number) {
-  return Math.max(0, Math.min(1, x));
-}
 function detectLangFallback(a?: Lang, b?: Lang): Lang {
   return a || b || "es";
 }
+
 function recommendMode(w: number, h: number) {
   if (w + 0.12 < h) return "wancko";
   if (h + 0.12 < w) return "hwancko";
@@ -46,79 +50,164 @@ export async function POST(req: NextRequest) {
     const lang = detectLangFallback(wancko?.lang, hwancko?.lang);
 
     if (!wState && !hState) {
-      return NextResponse.json({ error: "juramento: missing wancko/hwancko state" }, { status: 400 });
+      return NextResponse.json(
+        { error: "juramento: missing wancko/hwancko state" },
+        { status: 400 }
+      );
     }
 
-    // 1) Hits
+    /* =========================================================
+       1️⃣ Hits
+    ========================================================= */
+
     const wHits: MemoryHit[] = wState ? queryMemory(wState, 10) : [];
     const hHits: MemoryHit[] = hState ? queryMemory(hState, 10) : [];
 
-    // 2) Server AU
+    const wTop = wHits[0] || null;
+    const hTop = hHits[0] || null;
+
+    /* =========================================================
+       2️⃣ Server AU
+    ========================================================= */
+
     const wReport = wState ? evaluateAU(wState, wHits, wTurns, wSil) : null;
     const hReport = hState ? evaluateAU(hState, hHits, hTurns, hSil) : null;
 
-    // 3) Visual AU
-    const auWancko = wState ? computeAU("wancko", wHits, wTurns, wSil, lang) : null;
-    const auHWancko = hState ? computeAU("hwancko", hHits, hTurns, hSil, lang) : null;
+    /* =========================================================
+       3️⃣ Visual AU Layer
+    ========================================================= */
 
-    // 4) Tantra (si lo mandas)
-    const tantraConfig = body?.tantra || { bias: "neutral", intensity: 0.5 };
+    const auWancko = wState
+      ? computeAU("wancko", wHits, wTurns, wSil, lang)
+      : null;
 
-    const tantraWancko =
-      wReport && auWancko
-        ? applyTantraToDecision(wReport.signals.d, wReport.signals.dominance, wReport.signals.silenceRatio, tantraConfig)
-        : null;
+    const auHWancko = hState
+      ? computeAU("hwancko", hHits, hTurns, hSil, lang)
+      : null;
 
-    const tantraHWancko =
-      hReport && auHWancko
-        ? applyTantraToDecision(hReport.signals.d, hReport.signals.dominance, hReport.signals.silenceRatio, tantraConfig)
-        : null;
+    /* =========================================================
+       4️⃣ Frame + Ops + Metrics
+    ========================================================= */
 
-    // 5) Frame + Ops + Metrics (mod999999 primario)
     const framePack = computeFrameAndOps({
       wReport,
       hReport,
       wTurns,
       hTurns,
-      wTopKey: wHits[0]?.key || wHits[0]?.token || null,
-      hTopKey: hHits[0]?.key || hHits[0]?.token || null,
+      wTopKey: wTop?.key || null,
+      hTopKey: hTop?.key || null,
     });
 
-    // 6) Perfil Turmi + implicación
-    const wProfile = wReport ? pickTurmiProfile(wReport) : null;
-    const hProfile = hReport ? pickTurmiProfile(hReport) : null;
+    /* =========================================================
+       5️⃣ Context Layer (nuevo)
+    ========================================================= */
 
-    const recommended = recommendMode(wReport?.okScore ?? 0, hReport?.okScore ?? 0);
+    const intent = body?.intent || "natural"; // natural | performance
 
-    const vector = (wReport?.vector || hReport?.vector || "neutral") as "wancko" | "hwancko" | "neutral";
-    const profile =
-      (recommended === "wancko" ? wProfile : recommended === "hwancko" ? hProfile : wProfile || hProfile) || "mito";
-
-    const implication = acceptanceImplication(lang, vector, profile);
-
-    // (opcional) color global por dimensional distance
-    const dd = framePack.metrics.dimensional_distance;
-    const systemColor = dd < 0.25 ? "green" : dd < 0.5 ? "amber" : dd < 0.75 ? "violet" : "red";
-
-    return NextResponse.json({
-      lang,
+    const context = computeContext({
       frame: framePack.frame,
       ops: framePack.ops,
       metrics: framePack.metrics,
-      systemColor,
+      wReport,
+      hReport,
+      intent,
+      contextProfile: body?.contextProfile,
+      awareness: body?.awareness,
+      affect: body?.affect,
+    });
 
-      tantra_effect: { wancko: tantraWancko, hwancko: tantraHWancko },
+    /* =========================================================
+       6️⃣ Tantra
+    ========================================================= */
+
+    const tantraConfig = body?.tantra || {
+      bias: "neutral",
+      intensity: 0.5,
+    };
+
+    const tantraWancko =
+      wReport && auWancko
+        ? applyTantraToDecision(
+            wReport.signals.d,
+            wReport.signals.dominance,
+            wReport.signals.silenceRatio,
+            tantraConfig
+          )
+        : null;
+
+    const tantraHWancko =
+      hReport && auHWancko
+        ? applyTantraToDecision(
+            hReport.signals.d,
+            hReport.signals.dominance,
+            hReport.signals.silenceRatio,
+            tantraConfig
+          )
+        : null;
+
+    /* =========================================================
+       7️⃣ Perfil Turmi
+    ========================================================= */
+
+    const wProfile = wReport ? pickTurmiProfile(wReport) : null;
+    const hProfile = hReport ? pickTurmiProfile(hReport) : null;
+
+    const recommended = recommendMode(
+      wReport?.okScore ?? 0,
+      hReport?.okScore ?? 0
+    );
+
+    const vector =
+      (wReport?.vector ||
+        hReport?.vector ||
+        "neutral") as "wancko" | "hwancko" | "neutral";
+
+    const profile =
+      (recommended === "wancko"
+        ? wProfile
+        : recommended === "hwancko"
+        ? hProfile
+        : wProfile || hProfile) || "mito";
+
+    const implication = acceptanceImplication(lang, vector, profile);
+
+    /* =========================================================
+       RESPONSE
+    ========================================================= */
+
+    return NextResponse.json({
+      lang,
+
+      frame: framePack.frame,
+      ops: framePack.ops,
+      metrics: framePack.metrics,
+
+      context, // 👈 NUEVO
+
+      tantra_effect: {
+        wancko: tantraWancko,
+        hwancko: tantraHWancko,
+      },
 
       ui: {
-        recommendedMode: recommended,
+        recommendedMode: context.engine.recommendMode,
+        exposure: context.engine.exposure,
         implication,
       },
 
-      wancko: wReport ? { report: wReport, profile: wProfile, au: auWancko, top: wHits[0] || null } : null,
-      hwancko: hReport ? { report: hReport, profile: hProfile, au: auHWancko, top: hHits[0] || null } : null,
+      wancko: wReport
+        ? { report: wReport, profile: wProfile, au: auWancko }
+        : null,
+
+      hwancko: hReport
+        ? { report: hReport, profile: hProfile, au: auHWancko }
+        : null,
     });
   } catch (e) {
     console.error(e);
-    return NextResponse.json({ error: "juramento error" }, { status: 500 });
+    return NextResponse.json(
+      { error: "juramento error" },
+      { status: 500 }
+    );
   }
 }

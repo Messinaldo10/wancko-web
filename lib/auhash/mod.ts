@@ -1,7 +1,11 @@
 // lib/auhash/mod.ts
 
-export const BASE = 1_000_000;
-export const MOD = BASE - 1; // 999999
+/* =========================================================
+   BASES
+========================================================= */
+
+export const BASE = 1_000_000;        // 10^6 (lineal)
+export const MOD = BASE - 1;         // 999999 (cíclico)
 
 export const PRIMARY_MODS = [27, 7, 11, 13, 37] as const;
 
@@ -10,12 +14,16 @@ export type PrimaryMod = typeof PRIMARY_MODS[number];
 export type ResidueVector = Record<PrimaryMod, number>;
 
 /* =========================================================
-   Utilidades básicas
+   MOD EXPORTADO (CLAVE DEL ERROR)
 ========================================================= */
 
-function mod(n: number, m: number): number {
+export function mod(n: number, m: number): number {
   return ((n % m) + m) % m;
 }
+
+/* =========================================================
+   Inverso modular
+========================================================= */
 
 function egcd(a: number, b: number): [number, number, number] {
   if (b === 0) return [a, 1, 0];
@@ -30,84 +38,16 @@ export function modInv(a: number, m: number): number | null {
 }
 
 /* =========================================================
-   Vector de residuos
+   Vector de residuos primarios
 ========================================================= */
 
 export function residueVector(x: number): ResidueVector {
+  const value = mod(x, MOD);
   const result = {} as ResidueVector;
 
   for (const m of PRIMARY_MODS) {
-    result[m] = mod(x, m);
+    result[m] = mod(value, m);
   }
 
   return result;
-}
-
-/* =========================================================
-   Distancia estructural entre dos vectores
-========================================================= */
-
-export function residueDistance(a: ResidueVector, b: ResidueVector): number {
-  let total = 0;
-
-  for (const m of PRIMARY_MODS) {
-    const diff = Math.abs(a[m] - b[m]);
-    total += diff / m;
-  }
-
-  return total / PRIMARY_MODS.length;
-}
-
-/* =========================================================
-   Aproximación modular dirigida
-========================================================= */
-
-export type ModParam = {
-  M: number;                 // 999999
-  numerator: number;
-  denominator: PrimaryMod;
-  valueMod: number;
-  residues: ResidueVector;
-};
-
-export function approximateToPrimary(
-  realValue: number,
-  preferred?: PrimaryMod
-): ModParam {
-
-  const candidates = preferred
-    ? [preferred]
-    : PRIMARY_MODS;
-
-  let best: ModParam | null = null;
-  let bestError = Infinity;
-
-  for (const m of candidates) {
-    const numerator = Math.round(realValue * m);
-    const inv = modInv(m, MOD);
-    if (inv === null) continue;
-
-    const valueMod = mod(numerator * inv, MOD);
-    const residues = residueVector(valueMod);
-
-    const approx = numerator / m;
-    const error = Math.abs(realValue - approx);
-
-    if (error < bestError) {
-      bestError = error;
-      best = {
-        M: MOD,
-        numerator,
-        denominator: m,
-        valueMod,
-        residues,
-      };
-    }
-  }
-
-  if (!best) {
-    throw new Error("No modular approximation possible");
-  }
-
-  return best;
 }
