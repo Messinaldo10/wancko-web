@@ -33,12 +33,13 @@ export class AUEngineRunner {
       prev: this.last,
     });
 
-    const applied = applyRotation({
-      rotation: result.rotation,
-      ops: this.opsLive,
-      dominance: result.dominance,
-      entropyRatio: result.evolution.entropyRatio,
-    });
+ const applied = applyRotation({
+  rotation: result.rotation,
+  ops: this.opsLive,
+  dominance: result.dominance,
+  entropyRatio: result.evolution.entropyRatio,
+  propulsion: result.evolution.dynamics.PAU, // ← añadir esto
+});
 
     this.opsLive = applied.ops;
 
