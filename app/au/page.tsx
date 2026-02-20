@@ -35,8 +35,7 @@ export default function AUDashboardPage() {
 
   const esRef = useRef<EventSource | null>(null);
 
-  const url = useMemo(() => {
-    const u = new URL("/api/au/stream", window.location.origin);
+  const url = `/api/au/stream?intent=${intent}&dd=${dd}&pg=${pg}&cc=${cc}&ms=${ms}`;
     u.searchParams.set("intent", intent);
     u.searchParams.set("dd", String(dd));
     u.searchParams.set("pg", String(pg));
