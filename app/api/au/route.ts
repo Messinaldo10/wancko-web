@@ -14,17 +14,31 @@ const runner = new AUEngineRunner({
   },
 });
 
-export async function GET() {
+export async function GET(request: Request) {
+
+  const { searchParams } = new URL(request.url);
+
+  // 🔵 Inputs dinámicos
+  const perturb = Number(searchParams.get("perturb") ?? 0);
+  const intent = (searchParams.get("intent") ?? "performance") as
+    | "natural"
+    | "performance";
 
   const result = runner.tick({
     frame: {} as any,
     metrics: {
-      dimensional_distance: 0.3,
+      dimensional_distance: 0.3 + perturb,
       polarity_gap: 0.2,
       cycle_conflict: 0.1,
     },
-    intent: "performance",
+    intent,
   });
 
-  return NextResponse.json(result);
+  return NextResponse.json({
+    ...result,
+    meta: {
+      note: "AU Engine live",
+      timestamp: Date.now(),
+    },
+  });
 }

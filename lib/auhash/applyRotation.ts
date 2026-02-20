@@ -49,7 +49,8 @@ export function applyRotation(args: {
   rotation: RotationAction;
   ops: AUFrameOps;
   dominance: ContextDecision;
-  entropyRatio: number; // 🔴 ahora obligatorio para control entrópico
+  entropyRatio: number;
+  propulsion: number;   // 🔴 NUEVO
 }) {
   const { rotation, ops, dominance, entropyRatio } = args;
 
@@ -78,11 +79,12 @@ export function applyRotation(args: {
       // 🔵 Señal estructural (resonancia vs ruido)
       const signal = clamp01(ops.resonance - ops.noise) * 2 - 1;
 
-      const { up, down } = entropicReciprocalMultipliers({
-        signal,
-        entropyRatio,
-        maxK: 0.6,
-      });
+const intensity = 0.4 + 0.6 * args.propulsion; // 0.4..1
+const { up, down } = entropicReciprocalMultipliers({
+  signal,
+  entropyRatio,
+  maxK: 0.6 * intensity,
+});
 
       if (rotation.mode === "INVERT") {
         // Inversión controlada (no binaria)
