@@ -12,26 +12,38 @@ type Tick = {
   P: number;
   E: number;
   Er: number;
+
   Omega?: number;
   coord?: any;
+
   phase: number;
   rot: any;
   dom: any;
   m4: any;
   hash: string;
 
+  // CELDA16
   cell?: {
     domain: string;
     state: string;
     code: string;
   };
 
-  // 🔥 Wancko fields al nivel raíz
+  // Wancko (al nivel raíz)
   mode?: string;
   modeLabel?: string;
   modeReason?: string;
   weights?: any;
+
+  // Baski
+  baski?: {
+    lockPropulsion: boolean;
+    clampTMax: number;
+    dampExtra: number;
+    reason: string;
+  };
 };
+
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
 }

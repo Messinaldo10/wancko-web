@@ -9,8 +9,10 @@ import { computeEntropy999999 } from "./entropy";
 import { computeAUHash } from "./hash";
 import { decideRotation, type RotationAction } from "./rotation";
 import { computeMatrix4, type MatrixCell } from "./matrix4";
-import { entropicIfBlend, entropicReciprocalMultipliers } from "./entropicOperators";
+
 import { decideWanckoMode } from "./wanckoMode";
+import { computePhysicsAU } from "./physicsAU";
+import { decideBaskiGuard } from "./baskiGuard";
 
 /* =========================================================
    Types
@@ -19,7 +21,7 @@ import { decideWanckoMode } from "./wanckoMode";
 export type ContextCell = {
   domain: "E" | "I" | "M" | "G";
   state: "A" | "B" | "C" | "D";
-  code: string; // ejemplo: "E-A"
+  code: string; // "E-A"
 };
 
 export type ContextIntent = "natural" | "performance";
@@ -60,10 +62,6 @@ export type ContextEngineBias = {
   exposure: "mirror" | "engine" | "both";
 };
 
-/* =========================================================
-   AU Dynamics (Ψ, R, T, Ω, NAU, PAU)
-========================================================= */
-
 export type ContextCoord = {
   seria: number;
   tonta: number;
@@ -87,13 +85,32 @@ export type ContextDynamics = {
   coord: ContextCoord;
   NAU: NAUDynamic;
   PAU: number;
+
+  // Baski visible (para UI/debug)
+  baski: {
+    lockPropulsion: boolean;
+    clampTMax: number;
+    dampExtra: number;
+    reason: string;
+  };
+
+  // debug físico opcional
+  physics?: {
+    R_raw: number;
+    T_raw: number;
+    alphaR: number;
+    alphaT: number;
+    Tmax: number;
+    jerkMax: number;
+    damping: number;
+  };
 };
 
 export type ContextEvolution = {
   tMs: number;
   dtMs: number;
 
-  alignmentScore: number;
+  alignmentScore: number; // Ψ
   dAlignment: number;
 
   entropyRaw: number;
@@ -112,22 +129,8 @@ export type ContextAU = {
   auHash: string;
   hashMaterial: string;
 
-  // 🔥 AÑADE ESTO
+  // CELDA16 aquí (para no romper stream/UI)
   cell: ContextCell;
-
-  torEffective: {
-    biasHoldEff: number;
-    biasReleaseEff: number;
-    biasSilenceEff: number;
-    multipliers: { up: number; down: number; k: number };
-  };
-
-  metricsSoft: {
-    ddSoft: number;
-    pgSoft: number;
-    ccSoft: number;
-    factors: { ddFactor: number; pgFactor: number; ccFactor: number };
-  };
 };
 
 export type ContextResult = {
@@ -150,26 +153,14 @@ function clamp01(x: number) {
   if (Number.isNaN(x)) return 0;
   return Math.max(0, Math.min(1, x));
 }
-
-function clamp(x: number, lo: number, hi: number) {
-  if (Number.isNaN(x)) return lo;
-  return Math.max(lo, Math.min(hi, x));
-}
-
 function mean(xs: number[]) {
-  if (!xs.length) return 0;
   const valid = xs.filter(v => typeof v === "number" && !Number.isNaN(v));
   if (!valid.length) return 0;
   return valid.reduce((a, b) => a + b, 0) / valid.length;
 }
 
-function tanh(x: number) {
-  const e2x = Math.exp(2 * x);
-  return (e2x - 1) / (e2x + 1);
-}
-
 /* =========================================================
-   Alignment Score
+   Alignment Score (Ψ base)
 ========================================================= */
 
 function computeAlignmentScore(args: {
@@ -178,21 +169,32 @@ function computeAlignmentScore(args: {
   UC: number; INC: number;
   biasHold: number; biasRelease: number; biasSilence: number;
 }) {
+  const dd = clamp01(args.dd);
+  const pg = clamp01(args.pg);
+  const cc = clamp01(args.cc);
+  const res = clamp01(args.res);
+  const noise = clamp01(args.noise);
+  const curv = clamp01(args.curv);
+  const UC = clamp01(args.UC);
+  const INC = clamp01(args.INC);
+
+  const hold = clamp01(args.biasHold);
+  const rel  = clamp01(args.biasRelease);
+  const sil  = clamp01(args.biasSilence);
 
   const harmony =
-    0.30 * (1 - args.cc) +
-    0.18 * (1 - args.dd) +
-    0.14 * (1 - args.pg) +
-    0.20 * args.res +
-    0.10 * (1 - args.noise) +
-    0.08 * (1 - Math.abs(args.curv - 0.5));
+    0.30 * (1 - cc) +
+    0.18 * (1 - dd) +
+    0.14 * (1 - pg) +
+    0.20 * res +
+    0.10 * (1 - noise) +
+    0.08 * (1 - Math.abs(curv - 0.5));
 
-  const regulation = 0.14 * args.UC - 0.10 * args.INC;
-
+  const regulation = 0.14 * UC - 0.10 * INC;
   const control =
-    0.08 * (1 - args.biasHold) +
-    0.06 * args.biasRelease +
-    0.04 * (1 - args.biasSilence);
+    0.08 * (1 - hold) +
+    0.06 * rel +
+    0.04 * (1 - sil);
 
   return clamp01(harmony + regulation + control);
 }
@@ -207,16 +209,19 @@ export function computeContext(args: {
   metrics: AUFrameMetrics;
   wReport?: JuramentoReport | null;
   hReport?: JuramentoReport | null;
+
   intent: ContextIntent;
   contextProfile?: ContextProfile;
   awareness?: AwarenessVector;
   affect?: AffectField;
+
   prev?: AUContextState | null;
   nowMs?: number;
   baseN?: number;
   xForBaseN?: number;
 }): ContextResult {
 
+  const intent = args.intent;               // ✅ evita “intent is not defined”
   const nowMs = args.nowMs ?? Date.now();
   const prev = args.prev ?? null;
 
@@ -233,7 +238,6 @@ export function computeContext(args: {
   const universal = clamp01(awareness.UC);
 
   let whoDominates: "SELF" | "CONTEXT" | "META" = "META";
-
   if (universal > 0.75) whoDominates = "META";
   else if (singularity > mass + 0.15) whoDominates = "SELF";
   else if (mass > singularity + 0.15) whoDominates = "CONTEXT";
@@ -243,16 +247,12 @@ export function computeContext(args: {
   ========================================================= */
 
   let channel: "CUMBRE" | "BASE" = "BASE";
-
-  if (profile.specializationBias > profile.generalizationBias + 0.1)
-    channel = "CUMBRE";
-  else if (profile.generalizationBias > profile.specializationBias + 0.1)
-    channel = "BASE";
-  else
-    channel = universal > 0.6 ? "CUMBRE" : "BASE";
+  if (profile.specializationBias > profile.generalizationBias + 0.1) channel = "CUMBRE";
+  else if (profile.generalizationBias > profile.specializationBias + 0.1) channel = "BASE";
+  else channel = universal > 0.6 ? "CUMBRE" : "BASE";
 
   /* =========================================================
-     Metrics base
+     Metrics + Ops
   ========================================================= */
 
   const dd0 = clamp01(args.metrics.dimensional_distance);
@@ -273,7 +273,7 @@ export function computeContext(args: {
   const biasRelease0 = clamp01(0.45 * ent0 + 0.3 * res0 + 0.2 * affect.dopamine - biasHold0 * 0.35);
 
   /* =========================================================
-     Entropy base
+     Entropy 999999
   ========================================================= */
 
   const entropy = computeEntropy999999({
@@ -287,13 +287,12 @@ export function computeContext(args: {
   });
 
   const dtMs = Math.max(1, nowMs - (prev?.tMs ?? nowMs));
-  const dtMin = dtMs / 60000;
 
   /* =========================================================
-     Ψ
+     Ψ (alignmentScore)
   ========================================================= */
 
-  const alignmentScore = computeAlignmentScore({
+  const Psi = computeAlignmentScore({
     dd: dd0, pg: pg0, cc: cc0,
     res: res0, noise: noise0, curv: curv0,
     UC: awareness.UC,
@@ -303,16 +302,8 @@ export function computeContext(args: {
     biasSilence: biasSilence0,
   });
 
-  const prevPsi = prev?.alignmentScore ?? alignmentScore;
-  const dAlignment = alignmentScore - prevPsi;
-
-  /* =========================================================
-     R & T (dinámicos reales)
-  ========================================================= */
-
-  const R = dAlignment / (dtMin || 1e-9);
-  const prevR = prev?.R ?? R;
-  const T = (R - prevR) / (dtMin || 1e-9);
+  const prevPsi = prev?.alignmentScore ?? Psi;
+  const dPsi = Psi - prevPsi;
 
   /* =========================================================
      Ω_SO
@@ -321,135 +312,157 @@ export function computeContext(args: {
   const Omega_SO = clamp01(Math.abs(singularity - mass));
 
   /* =========================================================
-     Seria / Tonta / Juicio / Sesgo
+     Seria/Tonta + Juicio/Sesgo
   ========================================================= */
 
-  const S = alignmentScore;
-  const O = 1 - entropy.ratio;
+  // “Organización” O la aproximamos como (1 - entropía ratio) por ahora
+  const O = clamp01(1 - entropy.ratio);
 
-  const seria = clamp01(0.6 * O + 0.4 * (1 - Math.abs(R) / 2));
-  const tonta = clamp01(0.6 * entropy.ratio + 0.4 * Math.abs(T) / 10);
-
+  // Juicio/sesgo derivados del gap singularidad-masa
   const juicio = clamp01(1 - Omega_SO);
   const sesgo = clamp01(Omega_SO);
 
+  // Seria/Tonta acopladas a (O) y a la dinámica (se refinan más adelante)
+  // NOTA: aquí aún no usamos R/T; eso lo fija physicsAU con estabilidad
+  const seria = clamp01(0.65 * O + 0.35 * juicio);
+  const tonta = clamp01(0.65 * entropy.ratio + 0.35 * sesgo);
+
+  const coord: ContextCoord = { seria, tonta, juicio, sesgo };
+
   /* =========================================================
-     NAU
+     Física AU completa: R/T estables + PAU estable
   ========================================================= */
 
-  const Rn = tanh(R * 2.5);
-  const Tn = tanh(T * 0.8);
+  const phys = computePhysicsAU({
+    Psi,
+    dPsi,
+    dtMs,
+    entropyRatio: entropy.ratio,
+    Omega_SO,
+    sesgo,
+    prev: prev ? { R_s: prev.R_s, T_s: prev.T_s } : null,
+  });
 
-  const magnitude = clamp01(Math.sqrt(S * S + 0.25 * Rn * Rn + 0.15 * Tn * Tn));
-  const phase = clamp01((Math.atan2(Rn + 0.5 * Tn, S + 1e-9) + Math.PI) / (2 * Math.PI));
+  /* =========================================================
+     Baski guard: limita propulsión y T según riesgo
+  ========================================================= */
 
-  const NAU: NAUDynamic = { Psi: S, R, T, magnitude, phase };
+  const baski = decideBaskiGuard({
+    entropyRatio: entropy.ratio,
+    sesgo,
+    Omega_SO,
+    Psi: phys.Psi,
+    R: phys.R,
+    T: phys.T,
+  });
 
-  const g = clamp01(0.5 + 0.5 * tanh(1.2 * Rn + 0.8 * Tn));
-  const PAU = clamp01(S * g);
+  // Aplicación Baski: clamp adicional T + damping extra + lock P
+  const T_b = Math.max(-baski.clampTMax, Math.min(baski.clampTMax, phys.T));
+  let P_b = phys.PAU * (1 - baski.dampExtra);
+  if (baski.lockPropulsion) P_b = 0;
 
   const dynamics: ContextDynamics = {
-    Psi: S,
-    R,
-    T,
+    Psi: phys.Psi,
+    R: phys.R,
+    T: T_b,
     Omega_SO,
-    coord: { seria, tonta, juicio, sesgo },
-    NAU,
-    PAU,
+    coord,
+    NAU: { ...phys.NAU, T: T_b },
+    PAU: clamp01(P_b),
+    baski,
+    physics: {
+      R_raw: phys.raw.R_raw,
+      T_raw: phys.raw.T_raw,
+      alphaR: phys.raw.alphaR,
+      alphaT: phys.raw.alphaT,
+      Tmax: phys.raw.Tmax,
+      jerkMax: phys.raw.jerkMax,
+      damping: phys.raw.damping,
+    },
   };
 
-/* =========================================================
-   CELDA16 (Dominio × Estado)
-========================================================= */
-
-// 1️⃣ Dominio dominante
-
-let domain: "E" | "I" | "M" | "G" = "E";
-
-if (dd0 >= res0 && dd0 >= ent0 && dd0 >= awareness.UC) domain = "E";
-else if (res0 >= dd0 && res0 >= ent0 && res0 >= awareness.UC) domain = "I";
-else if (ent0 >= dd0 && ent0 >= res0 && ent0 >= awareness.UC) domain = "M";
-else domain = "G";
-
-// 2️⃣ Estado relacional
-
-let state: "A" | "B" | "C" | "D" = "C";
-
-const dynamicEnergy = Math.abs(R) + Math.abs(T);
-
-if (dynamics.coord.juicio > 0.7 && alignmentScore > 0.6) {
-  state = "A"; // coherente
-}
-else if (dynamics.coord.sesgo > 0.7 && alignmentScore < 0.5) {
-  state = "B"; // desalineado
-}
-else if (dynamicEnergy < 0.05) {
-  state = "C"; // neutro / latente
-}
-else if (Math.abs(T) > 0.5) {
-  state = "D"; // transmutación
-}
-
-const cell = {
-  domain,
-  state,
-  code: `${domain}-${state}`,
-};
-
-const wancko = decideWanckoMode({
-  intent: args.intent,   // 🔥 FIX DIRECTO
-  entropyRatio: entropy.ratio,
-  Psi: dynamics.Psi,
-  R: dynamics.R,
-  T: dynamics.T,
-  Omega_SO: dynamics.Omega_SO,
-  juicio: dynamics.coord.juicio,
-  sesgo: dynamics.coord.sesgo,
-  cell,
-});
-
   /* =========================================================
-     Rotation
+     CELDA16 (Dominio × Estado)
   ========================================================= */
 
+  let domain: "E" | "I" | "M" | "G" = "E";
+  if (dd0 >= res0 && dd0 >= ent0 && dd0 >= awareness.UC) domain = "E";
+  else if (res0 >= dd0 && res0 >= ent0 && res0 >= awareness.UC) domain = "I";
+  else if (ent0 >= dd0 && ent0 >= res0 && ent0 >= awareness.UC) domain = "M";
+  else domain = "G";
+
+  let state: "A" | "B" | "C" | "D" = "C";
+  const dynamicEnergy = Math.abs(dynamics.R) + 0.35 * Math.abs(dynamics.T);
+
+  if (coord.juicio > 0.7 && Psi > 0.6) state = "A";
+  else if (coord.sesgo > 0.7 && Psi < 0.5) state = "B";
+  else if (dynamicEnergy < 0.08) state = "C";
+  else if (Math.abs(dynamics.T) > 0.65) state = "D";
+
+  const cell: ContextCell = { domain, state, code: `${domain}-${state}` };
+
+  /* =========================================================
+     Wancko mode decision (R/T/P/C)
+  ========================================================= */
+
+  const wancko = decideWanckoMode({
+    intent,
+    entropyRatio: entropy.ratio,
+    Psi: dynamics.Psi,
+    R: dynamics.R,
+    T: dynamics.T,
+    Omega_SO: dynamics.Omega_SO,
+    juicio: coord.juicio,
+    sesgo: coord.sesgo,
+    cell,
+    baskiLock: dynamics.baski.lockPropulsion,
+  });
+
+  /* =========================================================
+     Rotation (A) — usa dinámica estable + entropía
+  ========================================================= */
+
+  const dEntropy = entropy.raw - (prev?.entropyRaw ?? entropy.raw);
   const rotation = decideRotation({
     entropyRatio: entropy.ratio,
-    dEntropy: entropy.raw - (prev?.entropyRaw ?? entropy.raw),
-    alignmentScore,
-    dAlignment,
+    dEntropy,
+    alignmentScore: Psi,
+    dAlignment: dPsi,
     whoDominates,
     channel,
-    forceRotate: entropy.ratio > 0.85,
-    intent: args.intent,
+    forceRotate: entropy.ratio > 0.85 || dynamics.baski.lockPropulsion,
+    intent,
     UC: awareness.UC,
     INC: awareness.INC,
   });
 
   /* =========================================================
-     BaseN + Hash
+     BaseN + Hash + Matrix4 (C + D)
   ========================================================= */
 
   const N = args.baseN ?? 16;
-  const x = Math.round(
-    1000 * alignmentScore +
-    700 * entropy.ratio +
-    500 * awareness.ICH +
-    300 * awareness.CSC +
-    200 * awareness.UC +
-    150 * awareness.INC
-  );
+  const x =
+    args.xForBaseN ??
+    Math.round(
+      1000 * Psi +
+      700 * entropy.ratio +
+      500 * awareness.ICH +
+      300 * awareness.CSC +
+      200 * awareness.UC +
+      150 * awareness.INC
+    );
 
   const sig = baseNSignature(x, N);
   const matrix4 = computeMatrix4(sig.phase);
 
   const { auHash, yoGrad, hashMaterial } = computeAUHash({
     tMs: nowMs,
-    intent: args.intent,
+    intent,
     ICH: awareness.ICH,
     CSC: awareness.CSC,
     UC: awareness.UC,
     INC: awareness.INC,
-    alignmentScore,
+    alignmentScore: Psi,
     entropyRaw: entropy.raw,
     sig,
     whoDominates,
@@ -457,13 +470,16 @@ const wancko = decideWanckoMode({
   });
 
   /* =========================================================
-     Explain
+     Explain (útil para logs)
   ========================================================= */
 
   const explain =
     `Dominance=${whoDominates} via ${channel}. ` +
-    `Ψ=${S.toFixed(3)} R=${R.toFixed(3)} T=${T.toFixed(3)} Ω=${Omega_SO.toFixed(3)} P=${PAU.toFixed(3)}. ` +
-    `E=${entropy.raw}. Hash=${auHash}.`;
+    `Ψ=${dynamics.Psi.toFixed(3)} R=${dynamics.R.toFixed(3)} T=${dynamics.T.toFixed(3)} Ω=${Omega_SO.toFixed(3)} P=${dynamics.PAU.toFixed(3)}. ` +
+    `E=${entropy.raw} r=${entropy.ratio.toFixed(3)} dE=${dEntropy}. ` +
+    `Cell=${cell.code} Wancko=${wancko.mode}. ` +
+    `Baski=${dynamics.baski.lockPropulsion ? "LOCK" : "OK"}. ` +
+    `Hash=${auHash}.`;
 
   return {
     dominance: { whoDominates, channel },
@@ -472,7 +488,7 @@ const wancko = decideWanckoMode({
       biasHold: biasHold0,
       biasRelease: biasRelease0,
       biasSilence: biasSilence0,
-      forceRotate: entropy.ratio > 0.85,
+      forceRotate: entropy.ratio > 0.85 || dynamics.baski.lockPropulsion,
     },
 
     engine: {
@@ -485,11 +501,11 @@ const wancko = decideWanckoMode({
     evolution: {
       tMs: nowMs,
       dtMs,
-      alignmentScore,
-      dAlignment,
+      alignmentScore: Psi,
+      dAlignment: dPsi,
       entropyRaw: entropy.raw,
       entropyRatio: entropy.ratio,
-      dEntropy: entropy.raw - (prev?.entropyRaw ?? entropy.raw),
+      dEntropy,
       dynamics,
       wancko,
     },
@@ -505,18 +521,6 @@ const wancko = decideWanckoMode({
       auHash,
       hashMaterial,
       cell,
-      torEffective: {
-        biasHoldEff: biasHold0,
-        biasReleaseEff: biasRelease0,
-        biasSilenceEff: biasSilence0,
-        multipliers: { up: 1, down: 1, k: 0 },
-      },
-      metricsSoft: {
-        ddSoft: dd0,
-        pgSoft: pg0,
-        ccSoft: cc0,
-        factors: { ddFactor: 1, pgFactor: 1, ccFactor: 1 },
-      },
     },
   };
 }

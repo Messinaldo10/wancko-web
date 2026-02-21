@@ -1,4 +1,5 @@
 // app/api/au/stream/route.ts
+
 export const runtime = "nodejs";
 
 import { AUEngineRunner } from "../../../../lib/auhash/engineRunner";
@@ -27,7 +28,6 @@ export async function GET(req: Request) {
   const dd = num(searchParams.get("dd"), 0.3);
   const pg = num(searchParams.get("pg"), 0.2);
   const cc = num(searchParams.get("cc"), 0.1);
-
   const intervalMs = Math.max(
     50,
     Math.min(2000, num(searchParams.get("ms"), 250))
@@ -56,26 +56,31 @@ export async function GET(req: Request) {
           P: r.evolution.dynamics.PAU,
           E: r.evolution.entropyRaw,
           Er: r.evolution.entropyRatio,
+          phase: r.evolution.dynamics.NAU.phase,
+
           Omega: r.evolution.dynamics.Omega_SO,
           coord: r.evolution.dynamics.coord,
-          phase: r.evolution.dynamics.NAU.phase,
+
           rot: r.rotation,
           dom: r.dominance,
           m4: r.au.matrix4,
-          cell: r.au.cell, // si ya lo estás devolviendo en context.ts
+          cell: r.au.cell,
           hash: r.au.auHash,
 
-          // ✅ Wancko Mode (ahora sí, desde r)
+          // Wancko
           mode: r.evolution.wancko?.mode,
           modeLabel: r.evolution.wancko?.label,
           modeReason: r.evolution.wancko?.reason,
           weights: r.evolution.wancko?.weights,
+
+          // Baski
+          baski: r.evolution.dynamics.baski,
         };
 
         controller.enqueue(enc.encode(`data: ${JSON.stringify(payload)}\n\n`));
       }, intervalMs);
 
-      // cerrar limpio si el cliente corta
+      // cierre limpio
       // @ts-ignore
       req.signal?.addEventListener?.("abort", () => {
         clearInterval(timer);
