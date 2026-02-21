@@ -19,15 +19,18 @@ type Tick = {
   dom: any;
   m4: any;
   hash: string;
+
   cell?: {
     domain: string;
     state: string;
-    code: string; // "E-A", "I-D", etc.
-mode?: string;
-modeLabel?: string;
-modeReason?: string;
-weights?: any;
+    code: string;
   };
+
+  // 🔥 Wancko fields al nivel raíz
+  mode?: string;
+  modeLabel?: string;
+  modeReason?: string;
+  weights?: any;
 };
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
