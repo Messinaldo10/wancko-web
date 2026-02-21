@@ -12,13 +12,23 @@ type Tick = {
   P: number;
   E: number;
   Er: number;
+  Omega?: number;
+  coord?: any;
   phase: number;
   rot: any;
   dom: any;
   m4: any;
   hash: string;
+  cell?: {
+    domain: string;
+    state: string;
+    code: string; // "E-A", "I-D", etc.
+mode?: string;
+modeLabel?: string;
+modeReason?: string;
+weights?: any;
+  };
 };
-
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
 }
@@ -245,6 +255,28 @@ export default function AUDashboardPage() {
                 <b>{latest.rot?.type}</b>
               </div>
 
+<div className="rounded-xl p-3 bg-black/30">
+  Celda 16×16<br />
+  <b>{latest.cell?.code ?? "—"}</b>
+</div>
+
+<div className="rounded-xl p-3 bg-black/30">
+  Ω_SO<br /><b>{(latest.Omega ?? 0).toFixed(3)}</b>
+</div>
+<div className="rounded-xl p-3 bg-black/30">
+  juicio/sesgo<br />
+  <b>{(latest.coord?.juicio ?? 0).toFixed(2)}/{(latest.coord?.sesgo ?? 0).toFixed(2)}</b>
+</div>
+
+<div className="rounded-xl p-3 bg-black/30">
+  Modo Wancko<br />
+  <b>{latest.modeLabel ?? "—"} ({latest.mode ?? "—"})</b>
+</div>
+
+<div className="rounded-xl p-3 bg-black/30 md:col-span-2">
+  Razón<br />
+  <b className="break-all">{latest.modeReason ?? "—"}</b>
+</div>
               <div className="rounded-xl p-3 bg-black/30 md:col-span-2">
                 Hash
                 <br />

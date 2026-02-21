@@ -1,6 +1,7 @@
-import { AUEngineRunner } from "../../../../lib/auhash/engineRunner";
+// app/api/au/stream/route.ts
+export const runtime = "nodejs";
 
-export const runtime = "nodejs"; // importante para mantener stream estable
+import { AUEngineRunner } from "../../../../lib/auhash/engineRunner";
 
 const runner = new AUEngineRunner({
   entanglement: 0.5,
@@ -23,12 +24,14 @@ export async function GET(req: Request) {
     | "natural"
     | "performance";
 
-  // perturbaciones (puedes mover sliders en el UI)
   const dd = num(searchParams.get("dd"), 0.3);
   const pg = num(searchParams.get("pg"), 0.2);
   const cc = num(searchParams.get("cc"), 0.1);
 
-  const intervalMs = Math.max(50, Math.min(2000, num(searchParams.get("ms"), 250)));
+  const intervalMs = Math.max(
+    50,
+    Math.min(2000, num(searchParams.get("ms"), 250))
+  );
 
   const stream = new ReadableStream({
     start(controller) {
@@ -53,11 +56,20 @@ export async function GET(req: Request) {
           P: r.evolution.dynamics.PAU,
           E: r.evolution.entropyRaw,
           Er: r.evolution.entropyRatio,
+          Omega: r.evolution.dynamics.Omega_SO,
+          coord: r.evolution.dynamics.coord,
           phase: r.evolution.dynamics.NAU.phase,
           rot: r.rotation,
           dom: r.dominance,
           m4: r.au.matrix4,
+          cell: r.au.cell, // si ya lo estás devolviendo en context.ts
           hash: r.au.auHash,
+
+          // ✅ Wancko Mode (ahora sí, desde r)
+          mode: r.evolution.wancko?.mode,
+          modeLabel: r.evolution.wancko?.label,
+          modeReason: r.evolution.wancko?.reason,
+          weights: r.evolution.wancko?.weights,
         };
 
         controller.enqueue(enc.encode(`data: ${JSON.stringify(payload)}\n\n`));
