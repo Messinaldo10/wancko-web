@@ -53,27 +53,23 @@ export class AUEngineRunner {
     this.opsLive = appliedMode.ops;
 
     // 3️⃣ Persistimos estado dinámico COMPLETO
-    this.last = {
-      tMs: result.evolution.tMs,
-      dominance: result.dominance,
-      tor: result.tor,
-      engine: result.engine,
+   this.last = {
+  tMs: result.evolution.tMs,
+  dominance: result.dominance,
+  tor: result.tor,
+  engine: result.engine,
 
-      alignmentScore: result.evolution.alignmentScore,
+  alignmentScore: result.evolution.alignmentScore,
 
-      // 🔥 IMPORTANTE PARA QUE T NO SEA 0
-      vAlignmentPerMin: result.evolution.vAlignmentPerMin,
+  entropyRaw: result.evolution.entropyRaw,
+  entropyRatio: result.evolution.entropyRatio,
 
-      entropyRaw: result.evolution.entropyRaw,
-      entropyRatio: result.evolution.entropyRatio,
+  // usamos R real desde dynamics
+  R: result.evolution.dynamics.R,
 
-      // guardamos R también (opcional pero útil)
-      R: result.evolution.dynamics.R,
-
-      auHash: result.au.auHash,
-
-      rotationCount: (this.last?.rotationCount ?? 0) + 1,
-    };
+  auHash: result.au.auHash,
+  rotationCount: (this.last?.rotationCount ?? 0) + 1,
+};
 
     // 4️⃣ Persistencia externa
     appendTick({
