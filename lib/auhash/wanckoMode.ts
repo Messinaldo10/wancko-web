@@ -6,13 +6,13 @@ export type WanckoDecision = {
   mode: WanckoMode;
   label: "Coherencia" | "Revelación" | "Transmutación" | "Propulsión";
   reason: string;
-  weights: { C: number; R: number; T: number; P: number }; // 0..1
+  weights: { C: number; R: number; T: number; P: number };
 };
 
 export type Cell16 = {
   domain: "E" | "I" | "M" | "G";
   state: "A" | "B" | "C" | "D";
-  code: string; // "E-A"
+  code: string;
 };
 
 function clamp01(x: number) {
@@ -23,12 +23,14 @@ function clamp01(x: number) {
 function pickMax(w: WanckoDecision["weights"]): WanckoMode {
   let best: WanckoMode = "C";
   let bestV = -1;
+
   (Object.keys(w) as WanckoMode[]).forEach((k) => {
     if (w[k] > bestV) {
       bestV = w[k];
       best = k;
     }
   });
+
   return best;
 }
 
@@ -42,79 +44,96 @@ export function decideWanckoMode(args: {
   juicio: number;
   sesgo: number;
   cell: Cell16;
-
-  // 🔥 AÑADE SOLO ESTA LÍNEA
-  baskiLock?: boolean;
-})
-
-// 🔥 Al principio de la función
-if (args.baskiLock) {
-  return {
-    mode: "R",
-    label: "Baski Override",
-    reason: "Governance lock active",
-    weights: {},
-  };
-}
-
+  baskiLock?: boolean; // 🔥 correctamente tipado
 }): WanckoDecision {
-  const { intent, cell } = args;
 
-  const E = clamp01(args.entropyRatio);
-  const Psi = clamp01(args.Psi);
-  const juicio = clamp01(args.juicio);
-  const sesgo = clamp01(args.sesgo);
+  const {
+    intent,
+    entropyRatio,
+    Psi,
+    R,
+    T,
+    juicio,
+    sesgo,
+    cell,
+    baskiLock,
+  } = args;
 
-  const absR = Math.abs(args.R);
-  const absT = Math.abs(args.T);
+  // 🔥 BASKI OVERRIDE (gobernanza fuerte)
+  if (baskiLock) {
+    return {
+      mode: "R",
+      label: "Revelación",
+      reason: "Baski governance lock active",
+      weights: { C: 0, R: 1, T: 0, P: 0 },
+    };
+  }
 
-  // Heurísticas base (sin épica):
-  // - C: cuando hay estabilidad y conviene consolidar
-  // - R: cuando hay sesgo o caída de coherencia: hacer visible sin forzar
-  // - T: cuando el sistema acelera mal o necesita invertir marco (D o T alta)
-  // - P: cuando hay coherencia suficiente y juicio para empujar
+  const E = clamp01(entropyRatio);
+  const PsiClamped = clamp01(Psi);
+  const juicioClamped = clamp01(juicio);
+  const sesgoClamped = clamp01(sesgo);
 
-  // Pesos iniciales por celda (E/I/M/G × A/B/C/D)
+  const absR = Math.abs(R);
+  const absT = Math.abs(T);
+
   const w = { C: 0.25, R: 0.25, T: 0.25, P: 0.25 };
 
-  // Estados A/B/C/D pesan el modo
+  // -------------------------
+  // Estado A/B/C/D
+  // -------------------------
   if (cell.state === "A") {
     w.P += 0.20; w.C += 0.10; w.R -= 0.10;
-  } else if (cell.state === "B") {
+  }
+  else if (cell.state === "B") {
     w.R += 0.25; w.T += 0.10; w.P -= 0.20;
-  } else if (cell.state === "C") {
+  }
+  else if (cell.state === "C") {
     w.C += 0.25; w.P -= 0.10;
-  } else if (cell.state === "D") {
+  }
+  else if (cell.state === "D") {
     w.T += 0.30; w.R += 0.05; w.C -= 0.10;
   }
 
-  // Dominio E/I/M/G modula estilo del modo
-  // (no cambia el modo por sí solo, pero empuja)
+  // -------------------------
+  // Dominio E/I/M/G
+  // -------------------------
   if (cell.domain === "E") { w.C += 0.05; w.R += 0.05; }
   if (cell.domain === "I") { w.R += 0.08; w.P += 0.05; }
   if (cell.domain === "M") { w.P += 0.08; w.T += 0.05; }
   if (cell.domain === "G") { w.T += 0.08; w.C += 0.05; }
 
+  // -------------------------
   // Señales dinámicas
-  // Entropía alta frena P y empuja R/T
+  // -------------------------
   if (E > 0.70) { w.P -= 0.25; w.R += 0.10; w.T += 0.10; }
-  // Coherencia baja empuja R
-  if (Psi < 0.55) { w.R += 0.20; w.P -= 0.10; }
-  // Coherencia alta + juicio alto habilita P/C
-  if (Psi > 0.70 && juicio > 0.65) { w.P += 0.20; w.C += 0.10; w.R -= 0.10; }
-  // Sesgo alto empuja R, y si además absT alto empuja T
-  if (sesgo > 0.65) { w.R += 0.20; w.P -= 0.10; }
-  if (sesgo > 0.65 && absT > 0.4) { w.T += 0.15; }
 
-  // Si T fuerte → transmutación (evita que T “se pierda”)
+  if (PsiClamped < 0.55) { w.R += 0.20; w.P -= 0.10; }
+
+  if (PsiClamped > 0.70 && juicioClamped > 0.65) {
+    w.P += 0.20; w.C += 0.10; w.R -= 0.10;
+  }
+
+  if (sesgoClamped > 0.65) { w.R += 0.20; w.P -= 0.10; }
+
+  if (sesgoClamped > 0.65 && absT > 0.4) { w.T += 0.15; }
+
   if (absT > 0.8) { w.T += 0.25; w.C -= 0.05; }
 
-  // Intent: natural favorece C/R; performance favorece P/T
-  if (intent === "natural") { w.C += 0.12; w.R += 0.10; w.P -= 0.08; }
-  if (intent === "performance") { w.P += 0.10; w.T += 0.08; w.C -= 0.05; }
+  // -------------------------
+  // Intent
+  // -------------------------
+  if (intent === "natural") {
+    w.C += 0.12; w.R += 0.10; w.P -= 0.08;
+  }
 
-  // Normaliza 0..1 por clamp (no hace suma=1; nos basta comparativa)
-  (Object.keys(w) as (keyof typeof w)[]).forEach((k) => (w[k] = clamp01(w[k])));
+  if (intent === "performance") {
+    w.P += 0.10; w.T += 0.08; w.C -= 0.05;
+  }
+
+  (Object.keys(w) as (keyof typeof w)[]).forEach(
+    (k) => (w[k] = clamp01(w[k]))
+  );
 
   const mode = pickMax(w);
 
@@ -125,8 +144,9 @@ if (args.baskiLock) {
     "Propulsión";
 
   const reason =
-    `cell=${cell.code} intent=${intent} Ψ=${Psi.toFixed(2)} E=${E.toFixed(2)} ` +
-    `juicio=${juicio.toFixed(2)} sesgo=${sesgo.toFixed(2)} |R|=${absR.toFixed(2)} |T|=${absT.toFixed(2)}`;
+    `cell=${cell.code} intent=${intent} Ψ=${PsiClamped.toFixed(2)} ` +
+    `E=${E.toFixed(2)} juicio=${juicioClamped.toFixed(2)} ` +
+    `sesgo=${sesgoClamped.toFixed(2)} |R|=${absR.toFixed(2)} |T|=${absT.toFixed(2)}`;
 
   return { mode, label, reason, weights: w };
 }
