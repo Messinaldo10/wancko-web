@@ -112,6 +112,9 @@ export type ContextAU = {
   auHash: string;
   hashMaterial: string;
 
+  // 🔥 AÑADE ESTO
+  cell: ContextCell;
+
   torEffective: {
     biasHoldEff: number;
     biasReleaseEff: number;
