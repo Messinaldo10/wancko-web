@@ -32,7 +32,7 @@ function pickMax(w: WanckoDecision["weights"]): WanckoMode {
   return best;
 }
 
-type DecideWanckoArgs = {
+export function decideWanckoMode(args: {
   intent: "natural" | "performance";
   entropyRatio: number;
   Psi: number;
@@ -43,9 +43,20 @@ type DecideWanckoArgs = {
   sesgo: number;
   cell: Cell16;
 
-  // 🔥 NUEVO
+  // 🔥 AÑADE SOLO ESTA LÍNEA
   baskiLock?: boolean;
-};
+})
+
+// 🔥 Al principio de la función
+if (args.baskiLock) {
+  return {
+    mode: "R",
+    label: "Baski Override",
+    reason: "Governance lock active",
+    weights: {},
+  };
+}
+
 }): WanckoDecision {
   const { intent, cell } = args;
 
