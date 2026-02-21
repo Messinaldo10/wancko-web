@@ -13,6 +13,7 @@ export type AUContextState = {
   vAlignmentPerMin: number; // ✅ R anterior (esto alimenta T)
   entropyRaw: number;
   entropyRatio: number;
+  R: number;
 
   auHash: string;
 
