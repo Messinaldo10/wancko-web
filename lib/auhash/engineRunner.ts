@@ -60,12 +60,14 @@ export class AUEngineRunner {
   engine: result.engine,
 
   alignmentScore: result.evolution.alignmentScore,
-
   entropyRaw: result.evolution.entropyRaw,
   entropyRatio: result.evolution.entropyRatio,
 
-  // usamos R real desde dynamics
   R: result.evolution.dynamics.R,
+
+  // 🔥 ESTABILIZADORES TEMPORALES
+  R_s: result.evolution.dynamics.R,
+  T_s: result.evolution.dynamics.T,
 
   auHash: result.au.auHash,
   rotationCount: (this.last?.rotationCount ?? 0) + 1,
