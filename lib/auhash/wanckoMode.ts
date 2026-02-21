@@ -32,16 +32,20 @@ function pickMax(w: WanckoDecision["weights"]): WanckoMode {
   return best;
 }
 
-export function decideWanckoMode(args: {
+type DecideWanckoArgs = {
   intent: "natural" | "performance";
-  entropyRatio: number; // 0..1
-  Psi: number;          // 0..1
-  R: number;            // (min^-1)
-  T: number;            // (min^-2)
-  Omega_SO: number;     // 0..1
-  juicio: number;       // 0..1
-  sesgo: number;        // 0..1
+  entropyRatio: number;
+  Psi: number;
+  R: number;
+  T: number;
+  Omega_SO: number;
+  juicio: number;
+  sesgo: number;
   cell: Cell16;
+
+  // 🔥 NUEVO
+  baskiLock?: boolean;
+};
 }): WanckoDecision {
   const { intent, cell } = args;
 
