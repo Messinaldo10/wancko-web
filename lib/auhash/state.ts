@@ -10,7 +10,6 @@ export type AUContextState = {
   engine: ContextEngineBias;
 
   alignmentScore: number;   // Ψ
-  vAlignmentPerMin: number; // ✅ R anterior (esto alimenta T)
   entropyRaw: number;
   entropyRatio: number;
   R: number;
